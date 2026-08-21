@@ -42,15 +42,37 @@ K_SEQ, K_JMP, K_JCC, K_CALL, K_RET, K_RTE, K_TRAP, K_UNK = (
     "seq", "jmp", "jcc", "call", "ret", "rte", "trap", "unk")
 
 
+# Structured operands, for the emitter. `ops` stays a tuple of strings for
+# display; `sd` carries the same thing in a form codegen can use:
+#
+#   ("r",  size, n)          register n at that size ('b'/'w'/'l')
+#   ("i",  size, value)      immediate
+#   ("ind", size, n)         @ERn
+#   ("dsp", size, n, d)      @(d, ERn)
+#   ("abs", size, a)         @aa
+#   ("pi",  size, n)         @ERn+      (post-increment)
+#   ("pd",  size, n)         @-ERn      (pre-decrement)
+#
+# An instruction with sd == None is one the decoder can size and classify but
+# not yet describe; the emitter counts those rather than guessing.
+def R(size, n):
+    return ("r", size, n)
+
+
+def I(size, v):
+    return ("i", size, v)
+
+
 class Insn:
-    __slots__ = ("addr", "length", "mnem", "ops", "kind", "target", "raw")
+    __slots__ = ("addr", "length", "mnem", "ops", "kind", "target", "raw", "sd")
 
     def __init__(self, addr, length, mnem, ops=(), kind=K_SEQ, target=None,
-                 raw=b""):
+                 raw=b"", sd=None):
         self.addr, self.length = addr, length
         self.mnem, self.ops, self.kind = mnem, ops, kind
         self.target = target          # resolved absolute target, when static
         self.raw = raw
+        self.sd = sd                  # (dst, src) structured, or None
 
     def __str__(self):
         return ("%s %s" % (self.mnem, ", ".join(self.ops))).strip()
@@ -103,26 +125,22 @@ def _decode_01(d, a, n):
             lst = "er%d-er%d" % (reg - cnt + 1, reg)
             return Insn(a, 4, "ldm.l", ("@sp+", "(%s)" % lst), raw=d[a:a + 4])
     if b1 == 0x00 and n >= 4:
-        # 01 00 then a MOV.L-shaped body
-        b2, b3 = d[a + 2], d[a + 3]
-        if b2 == 0x69:
-            return Insn(a, 4, "mov.l",
-                        ((r32(b3 & 7 | 0), "@%s" % r32(b3 >> 4)) if b3 & 0x80
-                         else ("@%s" % r32(b3 >> 4), r32(b3 & 7))), raw=d[a:a + 4])
-        if b2 == 0x6B:
-            sub = b3 & 0xF0
-            if sub in (0x00, 0x80):        # @aa:16
-                return Insn(a, 6, "mov.l", (), raw=d[a:a + 6])
-            return Insn(a, 8, "mov.l", (), raw=d[a:a + 8])
-        if b2 == 0x6D:
-            reg = b3 >> 4
-            if b3 & 0x80:
-                return Insn(a, 4, "push.l", (r32(b3 & 7),), raw=d[a:a + 4])
-            return Insn(a, 4, "pop.l", (r32(b3 & 7),), raw=d[a:a + 4])
-        if b2 == 0x6F:
-            return Insn(a, 6, "mov.l", (), raw=d[a:a + 6])
-        if b2 == 0x78:
-            return Insn(a, 10, "mov.l", (), raw=d[a:a + 10])
+        b2 = d[a + 2]
+        if 0x68 <= b2 <= 0x6F:
+            r = _mov_ea(d, a, b2 & 0xF, "l", 2)
+            if r:
+                # @ERm+/@-ERm on ER7 is what push and pop actually are
+                if (b2 & 0x0E) == 0x0C:
+                    ea = r.sd[0] if r.sd[0][0] in ("pd", "pi") else r.sd[1]
+                    if ea[2] == 7:
+                        push = ea[0] == "pd"
+                        reg = (r.sd[1] if push else r.sd[0])[2]
+                        return Insn(a, r.length, "push.l" if push else "pop.l",
+                                    (r32(reg),), raw=r.raw,
+                                    sd=(r.sd[0], r.sd[1]))
+                return r
+        if b2 == 0x78 and n >= 10:
+            return Insn(a, 10, "mov.l", ("@(d:24,ERs)",), raw=d[a:a + 10])
         return Insn(a, 4, "mov.l", (), raw=d[a:a + 4])
     if b1 == 0x40 and n >= 4:
         return Insn(a, 4, "ldc/stc", (), raw=d[a:a + 4])
@@ -139,6 +157,156 @@ def _decode_01(d, a, n):
     return None
 
 
+
+# --- the size-and-count groups -------------------------------------------
+# 0x0B/0x1B (ADDS/INC, SUBS/DEC) and 0x10-0x13/0x17 all share a shape: the
+# second byte's high nibble picks both the operation variant and the operand
+# size, and the low nibble is the register. The tables below are read straight
+# off the H8S/2000 instruction list; the awkward part is that the same nibble
+# means a different size in each group, so they cannot be merged.
+
+# high nibble -> (mnemonic, size, immediate) for 0x0B / 0x1B
+_STEP = {
+    0x0: ("s", "l", 1), 0x8: ("s", "l", 2), 0x9: ("s", "l", 4),
+    0x5: ("x", "w", 1), 0xD: ("x", "w", 2),
+    0x7: ("x", "l", 1), 0xF: ("x", "l", 2),
+}
+
+# high nibble -> (mnemonic, size) for 0x17
+_UNARY17 = {
+    0x0: ("not", "b"), 0x1: ("not", "w"), 0x3: ("not", "l"),
+    0x5: ("extu", "w"), 0x7: ("extu", "l"),
+    0x8: ("neg", "b"), 0x9: ("neg", "w"), 0xB: ("neg", "l"),
+    0xD: ("exts", "w"), 0xF: ("exts", "l"),
+}
+
+# high nibble -> (which of the pair, size, shift-by) for 0x10-0x13
+_SHIFT = {
+    0x0: (0, "b", 1), 0x1: (0, "w", 1), 0x3: (0, "l", 1),
+    0x4: (0, "b", 2), 0x5: (0, "w", 2), 0x7: (0, "l", 2),
+    0x8: (1, "b", 1), 0x9: (1, "w", 1), 0xB: (1, "l", 1),
+    0xC: (1, "b", 2), 0xD: (1, "w", 2), 0xF: (1, "l", 2),
+}
+
+_SHIFT_NAMES = {0x10: ("shll", "shal"), 0x11: ("shlr", "shar"),
+                0x12: ("rotxl", "rotl"), 0x13: ("rotxr", "rotr")}
+
+
+def _reg_name(size, n):
+    return {"b": r8, "w": r16, "l": r32}[size](n)
+
+
+def _decode_step(d, a, b0, b1):
+    """0x0B ADDS/INC and 0x1B SUBS/DEC."""
+    ent = _STEP.get(b1 >> 4)
+    if ent is None:
+        return None
+    kind, size, imm = ent
+    add = b0 == 0x0B
+    if kind == "s":
+        mnem = "adds" if add else "subs"
+    else:
+        mnem = ("inc" if add else "dec") + "." + size
+    n = b1 & 0xF
+    reg = _reg_name(size, n)
+    ops = ("#%d" % imm, reg)
+    return Insn(a, 2, mnem, ops, raw=d[a:a + 2],
+                sd=(R(size, n), I(size, imm)))
+
+
+def _decode_unary17(d, a, b1):
+    ent = _UNARY17.get(b1 >> 4)
+    if ent is None:
+        return None
+    mnem, size = ent
+    n = b1 & 0xF
+    return Insn(a, 2, "%s.%s" % (mnem, size), (_reg_name(size, n),),
+                raw=d[a:a + 2], sd=(R(size, n), None))
+
+
+def _decode_shift(d, a, b0, b1):
+    ent = _SHIFT.get(b1 >> 4)
+    if ent is None:
+        return None
+    which, size, by = ent
+    mnem = _SHIFT_NAMES[b0][which]
+    n = b1 & 0xF
+    ops = ((("#%d" % by,) if by != 1 else ()) + (_reg_name(size, n),))
+    return Insn(a, 2, "%s.%s" % (mnem, size), ops, raw=d[a:a + 2],
+                sd=(R(size, n), I(size, by)))
+
+
+
+# --- the MOV effective-address family ------------------------------------
+# 0x68-0x6F is one family in four addressing modes, and the same four repeat
+# for every operand size:
+#
+#   68/69   @ERm            2 bytes
+#   6A/6B   @aa:16 or :24   4 or 6 bytes
+#   6C/6D   @ERm+ / @-ERm   2 bytes
+#   6E/6F   @(d:16,ERm)     4 bytes
+#
+# Even opcodes are byte-sized and odd ones word-sized; prefixing the whole
+# thing with `01 00` makes it long. Bit 7 of the second byte is the direction:
+# set means register -> memory.
+#
+# The 6A/6B form is the exception -- it has no register field to hang the
+# direction bit on, so the second byte's high nibble encodes both:
+#   0 = load @aa:16   2 = load @aa:24   8 = store @aa:16   A = store @aa:24
+
+def _mov_ea(d, a, op, size, off):
+    """Decode a 0x68-0x6F MOV. `off` is where the opcode byte sits (0, or 2
+    when it follows an `01 00` prefix). Returns an Insn or None."""
+    n = len(d) - a
+    b1 = d[a + off + 1]
+    form = op & 0x0E
+    need = {0x08: 2, 0x0C: 2, 0x0E: 4}.get(form, 4)
+
+    if form == 0x0A:                                   # @aa
+        hi = b1 >> 4
+        wide = hi in (0x2, 0xA)
+        store = hi in (0x8, 0xA)
+        need = 6 if wide else 4
+        if n < off + need:
+            return None
+        reg = b1 & 0xF
+        # @aa:16 is *sign-extended* to 24 bits, which is how a 16-bit
+        # displacement reaches on-chip RAM and I/O at the top of the map:
+        # 0xECB4 means 0xFFECB4, not 0x00ECB4. @aa:24 is already full width.
+        if wide:
+            addr = u24(d, a + off + 3)
+        else:
+            addr = u16(d, a + off + 2)
+            if addr & 0x8000:
+                addr |= 0xFF0000
+        ea = ("abs", size, addr & 0xFFFFFF)
+        text = "@0x%06X" % (addr & 0xFFFFFF)
+    else:
+        if n < off + need:
+            return None
+        store = bool(b1 & 0x80)
+        m = (b1 >> 4) & 7
+        reg = b1 & 0xF
+        if form == 0x08:
+            ea, text = ("ind", size, m), "@%s" % r32(m)
+        elif form == 0x0C:
+            if store:
+                ea, text = ("pd", size, m), "@-%s" % r32(m)
+            else:
+                ea, text = ("pi", size, m), "@%s+" % r32(m)
+        else:                                          # @(d:16,ERm)
+            disp = _s16(u16(d, a + off + 2))
+            ea, text = ("dsp", size, m, disp), "@(0x%X,%s)" % (disp & 0xFFFF, r32(m))
+
+    rn = {"b": r8, "w": r16, "l": r32}[size](reg)
+    rop = ("r", size, reg & 7 if size == "l" else reg)
+    mnem = "mov." + size
+    total = off + need
+    if store:
+        return Insn(a, total, mnem, (rn, text), raw=d[a:a + total], sd=(ea, rop))
+    return Insn(a, total, mnem, (text, rn), raw=d[a:a + total], sd=(rop, ea))
+
+
 # --- the 0x79/0x7A immediate groups ---------------------------------------
 _IMM_OPS = {0x0: "mov", 0x1: "add", 0x2: "cmp", 0x3: "sub",
             0x4: "or", 0x5: "xor", 0x6: "and"}
@@ -153,7 +321,7 @@ def _decode_79(d, a, n):
     if op is None:
         return None
     return Insn(a, 4, op + ".w", ("#0x%04X" % u16(d, a + 2), r16(reg)),
-                raw=d[a:a + 4])
+                raw=d[a:a + 4], sd=(R("w", reg), I("w", u16(d, a + 2))))
 
 
 def _decode_7a(d, a, n):
@@ -165,7 +333,7 @@ def _decode_7a(d, a, n):
     if op is None:
         return None
     return Insn(a, 6, op + ".l", ("#0x%08X" % u32(d, a + 2), r32(reg)),
-                raw=d[a:a + 6])
+                raw=d[a:a + 6], sd=(R("l", reg & 7), I("l", u32(d, a + 2))))
 
 
 # --- 0x6x memory group ----------------------------------------------------
@@ -175,50 +343,18 @@ def _decode_6(d, a, n):
     lo = b0 & 0xF
 
     if lo in (0x0, 0x1, 0x2, 0x3):        # BSET/BNOT/BCLR/BTST Rn,<ea>
-        return Insn(a, 2, ("bset", "bnot", "bclr", "btst")[lo], (), raw=d[a:a + 2])
+        m = ("bset", "bnot", "bclr", "btst")[lo]
+        return Insn(a, 2, m, (r8(b1 >> 4), "@%s" % r32(b1 & 7)),
+                    raw=d[a:a + 2], sd=(("ind", "b", b1 & 7), R("b", b1 >> 4)))
     if lo in (0x4, 0x5, 0x6):             # OR/XOR/AND .w Rs,Rd
-        return Insn(a, 2, ("or", "xor", "and")[lo - 4] + ".w",
-                    (r16(b1 >> 4), r16(b1 & 0xF)), raw=d[a:a + 2])
+        m = ("or", "xor", "and")[lo - 4]
+        return Insn(a, 2, m + ".w", (r16(b1 >> 4), r16(b1 & 0xF)),
+                    raw=d[a:a + 2],
+                    sd=(R("w", b1 & 0xF), R("w", b1 >> 4)))
     if lo == 0x7:
         return Insn(a, 2, "bst/bist", (), raw=d[a:a + 2])
-    if lo == 0x8:                         # MOV.B @ERs,Rd / Rs,@ERd
-        if b1 & 0x80:
-            return Insn(a, 2, "mov.b", (r8(b1 & 0xF), "@%s" % r32(b1 >> 4 & 7)),
-                        raw=d[a:a + 2])
-        return Insn(a, 2, "mov.b", ("@%s" % r32(b1 >> 4 & 7), r8(b1 & 0xF)),
-                    raw=d[a:a + 2])
-    if lo == 0x9:                         # MOV.W @ERs,Rd / Rs,@ERd
-        if b1 & 0x80:
-            return Insn(a, 2, "mov.w", (r16(b1 & 0xF), "@%s" % r32(b1 >> 4 & 7)),
-                        raw=d[a:a + 2])
-        return Insn(a, 2, "mov.w", ("@%s" % r32(b1 >> 4 & 7), r16(b1 & 0xF)),
-                    raw=d[a:a + 2])
-    if lo in (0xA, 0xB):                  # MOV @aa:16 / @aa:24
-        sz = ".b" if lo == 0xA else ".w"
-        sub = b1 & 0xF0
-        if sub in (0x00, 0x80):
-            if n < 4:
-                return None
-            return Insn(a, 4, "mov" + sz, ("@0x%04X" % u16(d, a + 2),),
-                        raw=d[a:a + 4])
-        if n < 6:
-            return None
-        return Insn(a, 6, "mov" + sz, ("@0x%06X" % u24(d, a + 3),),
-                    raw=d[a:a + 6])
-    if lo == 0xC:                         # MOV.B @ERs+,Rd / Rs,@-ERd
-        return Insn(a, 2, "mov.b", (), raw=d[a:a + 2])
-    if lo == 0xD:                         # MOV.W @ERs+,Rd  (push/pop when ER7)
-        reg = b1 >> 4 & 7
-        if b1 & 0x80:
-            m = "push.w" if reg == 7 else "mov.w"
-            return Insn(a, 2, m, (r16(b1 & 0xF),), raw=d[a:a + 2])
-        m = "pop.w" if reg == 7 else "mov.w"
-        return Insn(a, 2, m, (r16(b1 & 0xF),), raw=d[a:a + 2])
-    if lo in (0xE, 0xF):                  # MOV @(d:16,ERs)
-        if n < 4:
-            return None
-        sz = ".b" if lo == 0xE else ".w"
-        return Insn(a, 4, "mov" + sz, (), raw=d[a:a + 4])
+    if lo >= 0x8:
+        return _mov_ea(d, a, lo, "b" if (lo & 1) == 0 else "w", 0)
     return None
 
 
@@ -256,58 +392,80 @@ def decode(d, a):
         m = {0x04: "orc", 0x05: "xorc", 0x06: "andc", 0x07: "ldc"}[b0]
         return Insn(a, 2, m, ("#0x%02X" % b1, "ccr"), raw=d[a:a + 2])
     if b0 == 0x08:
-        return Insn(a, 2, "add.b", (r8(b1 >> 4), r8(b1 & 0xF)), raw=d[a:a + 2])
+        return Insn(a, 2, "add.b", (r8(b1 >> 4), r8(b1 & 0xF)), raw=d[a:a + 2],
+                    sd=(R("b", b1 & 0xF), R("b", b1 >> 4)))
     if b0 == 0x09:
-        return Insn(a, 2, "add.w", (r16(b1 >> 4), r16(b1 & 0xF)), raw=d[a:a + 2])
+        return Insn(a, 2, "add.w", (r16(b1 >> 4), r16(b1 & 0xF)), raw=d[a:a + 2],
+                    sd=(R("w", b1 & 0xF), R("w", b1 >> 4)))
     if b0 == 0x0A:
         if b1 & 0x80:
             return Insn(a, 2, "add.l", (r32(b1 >> 4 & 7), r32(b1 & 7)),
-                        raw=d[a:a + 2])
-        return Insn(a, 2, "inc.b", (r8(b1 & 0xF),), raw=d[a:a + 2])
+                        raw=d[a:a + 2],
+                        sd=(R("l", b1 & 7), R("l", b1 >> 4 & 7)))
+        return Insn(a, 2, "inc.b", (r8(b1 & 0xF),), raw=d[a:a + 2],
+                    sd=(R("b", b1 & 0xF), I("b", 1)))
     if b0 == 0x0B:
-        return Insn(a, 2, "adds/inc", (), raw=d[a:a + 2])
+        r = _decode_step(d, a, b0, b1)
+        if r:
+            return r
     if b0 == 0x0C:
-        return Insn(a, 2, "mov.b", (r8(b1 >> 4), r8(b1 & 0xF)), raw=d[a:a + 2])
+        return Insn(a, 2, "mov.b", (r8(b1 >> 4), r8(b1 & 0xF)), raw=d[a:a + 2],
+                    sd=(R("b", b1 & 0xF), R("b", b1 >> 4)))
     if b0 == 0x0D:
-        return Insn(a, 2, "mov.w", (r16(b1 >> 4), r16(b1 & 0xF)), raw=d[a:a + 2])
+        return Insn(a, 2, "mov.w", (r16(b1 >> 4), r16(b1 & 0xF)), raw=d[a:a + 2],
+                    sd=(R("w", b1 & 0xF), R("w", b1 >> 4)))
     if b0 == 0x0E:
         return Insn(a, 2, "addx", (), raw=d[a:a + 2])
     if b0 == 0x0F:
         if b1 & 0x80:
             return Insn(a, 2, "mov.l", (r32(b1 >> 4 & 7), r32(b1 & 7)),
-                        raw=d[a:a + 2])
+                        raw=d[a:a + 2],
+                        sd=(R("l", b1 & 7), R("l", b1 >> 4 & 7)))
         return Insn(a, 2, "daa", (r8(b1 & 0xF),), raw=d[a:a + 2])
 
     # --- 0x1x ---
     if b0 in (0x10, 0x11, 0x12, 0x13):
-        m = ("shll/shal", "shlr/shar", "rotxl/rotl", "rotxr/rotr")[b0 - 0x10]
-        return Insn(a, 2, m, (), raw=d[a:a + 2])
+        r = _decode_shift(d, a, b0, b1)
+        if r:
+            return r
     if b0 in (0x14, 0x15, 0x16):
         return Insn(a, 2, ("or", "xor", "and")[b0 - 0x14] + ".b",
-                    (r8(b1 >> 4), r8(b1 & 0xF)), raw=d[a:a + 2])
+                    (r8(b1 >> 4), r8(b1 & 0xF)), raw=d[a:a + 2],
+                    sd=(R("b", b1 & 0xF), R("b", b1 >> 4)))
     if b0 == 0x17:
-        return Insn(a, 2, "not/extu/exts/neg", (), raw=d[a:a + 2])
+        r = _decode_unary17(d, a, b1)
+        if r:
+            return r
     if b0 == 0x18:
-        return Insn(a, 2, "sub.b", (r8(b1 >> 4), r8(b1 & 0xF)), raw=d[a:a + 2])
+        return Insn(a, 2, "sub.b", (r8(b1 >> 4), r8(b1 & 0xF)), raw=d[a:a + 2],
+                    sd=(R("b", b1 & 0xF), R("b", b1 >> 4)))
     if b0 == 0x19:
-        return Insn(a, 2, "sub.w", (r16(b1 >> 4), r16(b1 & 0xF)), raw=d[a:a + 2])
+        return Insn(a, 2, "sub.w", (r16(b1 >> 4), r16(b1 & 0xF)), raw=d[a:a + 2],
+                    sd=(R("w", b1 & 0xF), R("w", b1 >> 4)))
     if b0 == 0x1A:
         if b1 & 0x80:
             return Insn(a, 2, "sub.l", (r32(b1 >> 4 & 7), r32(b1 & 7)),
-                        raw=d[a:a + 2])
-        return Insn(a, 2, "dec.b", (r8(b1 & 0xF),), raw=d[a:a + 2])
+                        raw=d[a:a + 2],
+                        sd=(R("l", b1 & 7), R("l", b1 >> 4 & 7)))
+        return Insn(a, 2, "dec.b", (r8(b1 & 0xF),), raw=d[a:a + 2],
+                    sd=(R("b", b1 & 0xF), I("b", 1)))
     if b0 == 0x1B:
-        return Insn(a, 2, "subs/dec", (), raw=d[a:a + 2])
+        r = _decode_step(d, a, b0, b1)
+        if r:
+            return r
     if b0 == 0x1C:
-        return Insn(a, 2, "cmp.b", (r8(b1 >> 4), r8(b1 & 0xF)), raw=d[a:a + 2])
+        return Insn(a, 2, "cmp.b", (r8(b1 >> 4), r8(b1 & 0xF)), raw=d[a:a + 2],
+                    sd=(R("b", b1 & 0xF), R("b", b1 >> 4)))
     if b0 == 0x1D:
-        return Insn(a, 2, "cmp.w", (r16(b1 >> 4), r16(b1 & 0xF)), raw=d[a:a + 2])
+        return Insn(a, 2, "cmp.w", (r16(b1 >> 4), r16(b1 & 0xF)), raw=d[a:a + 2],
+                    sd=(R("w", b1 & 0xF), R("w", b1 >> 4)))
     if b0 == 0x1E:
         return Insn(a, 2, "subx", (), raw=d[a:a + 2])
     if b0 == 0x1F:
         if b1 & 0x80:
             return Insn(a, 2, "cmp.l", (r32(b1 >> 4 & 7), r32(b1 & 7)),
-                        raw=d[a:a + 2])
+                        raw=d[a:a + 2],
+                        sd=(R("l", b1 & 7), R("l", b1 >> 4 & 7)))
         return Insn(a, 2, "das", (r8(b1 & 0xF),), raw=d[a:a + 2])
 
     # --- 0x2x / 0x3x : MOV.B @aa:8 ---
@@ -399,7 +557,8 @@ def decode(d, a):
     if hi >= 0x8:
         m = {0x8: "add.b", 0x9: "addx.b", 0xA: "cmp.b", 0xB: "subx.b",
              0xC: "or.b", 0xD: "xor.b", 0xE: "and.b", 0xF: "mov.b"}[hi]
-        return Insn(a, 2, m, ("#0x%02X" % b1, r8(lo)), raw=d[a:a + 2])
+        return Insn(a, 2, m, ("#0x%02X" % b1, r8(lo)), raw=d[a:a + 2],
+                    sd=(R("b", lo), I("b", b1)))
 
     return Insn(a, 2, "?%02X%02X" % (b0, b1), kind=K_UNK, raw=d[a:a + 2])
 

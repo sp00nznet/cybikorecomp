@@ -1,0 +1,12 @@
+# No firmware or application data in this repo. Bring your own dumps.
+*.bin
+*.app
+*.e
+fw/
+apps/
+rom/
+
+generated/
+build/
+__pycache__/
+*.pyc

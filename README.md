@@ -1,0 +1,169 @@
+# cybikorecomp
+
+**A static-recompilation toolkit for the Cybiko — a 2000 handheld with a Hitachi H8S, a keyboard, and a 900 MHz radio in it.**
+
+The Cybiko Classic runs a **Hitachi H8S/2246** at 11 MHz in advanced mode:
+32-bit registers, 24-bit addresses, big-endian, variable-length instructions.
+Around it sit 512 KB of flash holding **CyOS**, a 32 KB internal boot ROM, a
+QWERTY keyboard, and a 900 MHz packet radio that let a room full of them form
+an ad-hoc mesh. Roughly 400 applications shipped for it.
+
+That makes it a very different target from the last one in this library. The
+[Tamagotchi](https://github.com/sp00nznet/tamarecomp) was recompilable *because
+of* its ISA — a 4-bit core whose only page-changing instruction took an
+immediate, so every jump target in the ROM was a build-time constant. The H8S
+is a general-purpose register machine, and its calls go through registers. That
+changes what "statically recompilable" is even allowed to mean here, and the
+first job is measuring it honestly rather than assuming.
+
+> **No ROM data here.** Firmware images and `.app` files are `.gitignore`d.
+> This repo is the decoder, the analyzer and the tools — bring your own dumps.
+
+---
+
+## Status
+
+Early. The decoder and the container format are done and self-checking; nothing
+is recompiled yet.
+
+| Stage | State |
+|---|---|
+| **`.app` container format** — parse, list, extract | ✅ 410/410 apps parse |
+| **H8S/2000 decoder** — lengths, control flow, operands | ✅ 0 undecodable in the boot ROM |
+| **Control-flow analysis** — trace from the vector table | ✅ complete, honest numbers below |
+| **`0x02` compression** — the codec every packed member uses | 🔨 unidentified |
+| **Indirect-call resolution** — 47 `jsr @ERn` in the boot ROM alone | ⬜ not started |
+| **C emitter** | ⬜ not started |
+| **Runtime** — H8S peripherals, LCD, keyboard, radio | ⬜ not started |
+
+```
+$ python tests/test_decode.py cyrom112.bin apps/
+lengths  ok  (11 encodings, one of every instruction size)
+stm/ldm  ok  (register ranges, both directions)
+branches ok  (relative targets, and indirects report no target)
+rom      ok  (2763 instructions, 101 entries, 110 stm/ldm pairs, 0 undecodable)
+apps     ok  (410 containers, 11011 members: 2373 stored, 8638 packed)
+```
+
+## What the boot ROM looks like
+
+`cyrom112.bin` is the 32 KB H8S internal ROM — the first thing that runs, and
+the natural first target because it is self-contained.
+
+```
+size            32768 bytes (0x8000); 25332 before the 0xFF padding
+vectors filled  44
+entry points    101 (57 of them call targets)
+instructions    2763
+bytes reached   8740  (34.5% of the non-padding image)
+
+unresolved      47
+  indirect jsr    47   0x001710 0x0016F6 0x0016DC 0x0016C2 ...
+```
+
+**34.5%, and 47 unresolved indirect calls.** That is the honest starting point
+and it is the whole story of this project so far. On the Tamagotchi the
+equivalent number was 100% with zero unresolved transfers, because a 4-bit core
+has nowhere to *put* a computed address. Here the compiler emits `jsr @ER2` and
+the target arrives in a register from somewhere else entirely — a vtable, a
+callback, a jump table built at runtime. Resolving those is the actual work of
+recompiling an H8S image, and no amount of looking at one instruction does it.
+
+## Instruction lengths are the whole game
+
+The H8S encodes instructions in 2, 4, 6, 8 or 10 bytes. On a fixed-width
+machine a wrong opcode costs you one instruction. Here it costs you *the rest
+of the stream*, because the next decode starts on the wrong byte.
+
+The first sweep over the boot ROM left 3.4% of instructions undecodable, and
+they were not scattered — 260 of them were `01 10`, `01 20` and `01 30`,
+always followed by `6D`:
+
+```
+000F26: 01 20 6d f4     0012BE: 01 30 6d f0
+001276: 01 20 6d 76     0012D2: 01 30 6d 73
+```
+
+Those are **STM.L and LDM.L**, which push and pop a run of two to four
+consecutive registers. `01 n0 6D Fm` stores `ERm..ERm+n`; `01 n0 6D 7m` loads
+them back, encoding the *last* register because it restores in reverse. They
+are function prologues and epilogues — which is why they turned up in exactly
+matched pairs, 76/76, 43/43 and 11/11, and why that balance is now an assertion
+in the test suite.
+
+They are four bytes long and the decoder was calling them two, so the stream
+desynchronised at every function boundary in the ROM. Fixing that one
+instruction took undecodable instructions from **262 to 2** — and both
+survivors are inside a data region a linear sweep walked through, identifiable
+because the decode there produces `brn`, "branch never", which no compiler has
+ever emitted.
+
+## The `.app` container
+
+A `.app` is not an executable. It is a small archive holding everything an
+application needs, with the H8S code as one member named `main.e`:
+
+```
+0   2      "Cy"
+2   2      entry count
+4   2      end of the name table
+6   10*n   entries: u16 name_offset, u32 data_offset, u32 length
+...        NUL-terminated names
+...        member data
+```
+
+Every member starts with a compression method byte: `0x00` stored, `0x02`
+packed with a big-endian u32 unpacked size after it. The layout is dense — the
+last member ends exactly at EOF — which is a cheap way to know the header was
+read correctly, and `tools/cyapp.py` raises if it ever does not hold.
+
+**All 410 applications parse**, 11,011 members between them. 2,373 are stored
+and come out whole; 8,638 are packed at an average of 2.21×.
+
+The `0x02` codec is not yet identified — it is not zlib and the packed streams
+have no recognisable header. Until it is, `main.e` cannot be extracted from a
+`.app`, which is one of the two things standing between here and recompiling an
+application. See [docs/FORMATS.md](docs/FORMATS.md).
+
+## Layout
+
+```
+cybikorecomp/
+├── tools/
+│   ├── h8s.py           H8S/2000 decoder — lengths, operands, control flow
+│   ├── analyze.py       trace from the vector table, report what is unresolved
+│   └── cyapp.py         the .app container: parse, list, extract
+├── tests/
+│   └── test_decode.py   encoding checks, plus whole-ROM and whole-library ones
+├── include/cybikorecomp/
+├── src/
+└── docs/
+```
+
+## Usage
+
+```sh
+python tools/analyze.py  cyrom112.bin          # what the boot ROM's flow looks like
+python tools/cyapp.py    Calculator.app        # list a container
+python tools/cyapp.py    Calculator.app -x out # extract its stored members
+python tests/test_decode.py cyrom112.bin apps/ # self-checks
+```
+
+The encoding checks run with no arguments; the ROM and app checks are skipped
+if you do not pass paths.
+
+## Where the images come from
+
+Nothing here ships one. The boot ROM and flash images are in MAME's `cybikov1`
+set (`cyrom112.bin`, `flash_v1246.bin`, and the v2 and Xtreme variants);
+applications are `.app` files from the TOSEC collection or the Cybiko Game CD.
+
+## License
+
+MIT. See [LICENSE](LICENSE) — that covers the code in this repository.
+
+It does not and cannot cover any firmware or application you point it at, and
+anything the tools produce from those is a derivative of your own dump.
+
+*Cybiko* is a trademark of its respective owner. This project is not affiliated
+with or endorsed by them; the name is used only to say which hardware it is.

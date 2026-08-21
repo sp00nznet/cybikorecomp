@@ -139,6 +139,20 @@ def body(i):
     if base == "nop":
         return []
 
+    # Bit operations. BTST only sets Z; the others read-modify-write and leave
+    # the flags alone. The bit number is either a 3-bit immediate or the low
+    # three bits of a register.
+    if base in ("bset", "bclr", "bnot", "btst"):
+        if i.sd is None:
+            return None
+        dst, src = i.sd
+        n = ("%s" % rd(src)) if src[0] == "i" else ("(%s & 7)" % rd(src))
+        if base == "btst":
+            return ["c->zf = ((%s >> %s) & 1) == 0;" % (rd(dst), n)]
+        op = {"bset": "|  (1u << %s)", "bclr": "& ~(1u << %s)",
+              "bnot": "^  (1u << %s)"}[base] % n
+        return ["t = %s %s;" % (rd(dst), op), wr(dst, "t")]
+
     if i.sd is None:
         return None
     dst, src = i.sd
@@ -245,6 +259,19 @@ def emit(d, ops, reached, out):
     w(HEADER)
     addrs = sorted(reached)
     covered = skipped = 0
+    stranded = 0
+
+    def go(target):
+        """`goto` a traced address, or trap out.
+
+        A branch can name a target the trace never took -- one outside the
+        mapped regions, say -- and emitting `goto L_xxx` for it does not
+        compile. Falling into the dispatch instead is both correct and
+        informative: the run stops and says where it wanted to go.
+        """
+        if target in reached:
+            return "goto L_%06X;" % target
+        return "c->pc = 0x%06XU; goto dispatch;" % target
 
     for k, a in enumerate(addrs):
         i = ops[a]
@@ -255,21 +282,25 @@ def emit(d, ops, reached, out):
             cond = {"beq": "c->zf", "bne": "!c->zf", "bcs": "c->cf",
                     "bcc": "!c->cf", "bmi": "c->nf", "bpl": "!c->nf",
                     "bvs": "c->vf", "bvc": "!c->vf"}.get(i.mnem.split(".")[0])
+            if i.target not in reached:
+                stranded += 1
             if i.kind == K_JMP:
-                w("    goto L_%06X;\n" % i.target)
+                w("    %s\n" % go(i.target))
             elif cond:
-                w("    if (%s) goto L_%06X;\n" % (cond, i.target))
+                w("    if (%s) { %s }\n" % (cond, go(i.target)))
             else:
-                w("    if (cy_cond(c, %d)) goto L_%06X;\n"
+                w("    if (cy_cond(c, %d)) { %s }\n"
                   % (i.raw[0] & 0xF if i.raw[0] >> 4 == 4 else i.raw[1] >> 4,
-                     i.target))
+                     go(i.target)))
             covered += 1
             continue
 
         if i.kind == K_CALL:
             w("    E[7] -= 4; MWL(E[7], 0x%06XU);\n" % nxt)
             if i.target is not None:
-                w("    goto L_%06X;\n" % i.target)
+                if i.target not in reached:
+                    stranded += 1
+                w("    %s\n" % go(i.target))
             else:
                 w("    c->pc = %s & 0xFFFFFF; goto dispatch;\n"
                   % indirect_target(i))
@@ -309,7 +340,7 @@ def emit(d, ops, reached, out):
     for a in addrs:
         w("    case 0x%06XU: goto L_%06X;\n" % (a, a))
     w(FOOTER)
-    return covered, skipped
+    return covered, skipped, stranded
 
 
 def main(argv):
@@ -323,13 +354,14 @@ def main(argv):
 
     (ops, reached, entries, calls, unresolved), runs = vtables.resolve(d, io)
     with open(argv[1], "w", encoding="utf-8") as f:
-        covered, skipped = emit(d, ops, reached, f)
+        covered, skipped, stranded = emit(d, ops, reached, f)
 
     total = covered + skipped
     print("%s" % argv[1])
     print("  instructions   %d" % total)
     print("  emitted        %d  (%.1f%%)" % (covered, 100.0 * covered / total))
     print("  unimplemented  %d  (%.1f%%)" % (skipped, 100.0 * skipped / total))
+    print("  stranded jumps %d  (target never traced; traps instead)" % stranded)
     return 0
 
 

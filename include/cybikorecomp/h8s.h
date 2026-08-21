@@ -1,0 +1,121 @@
+/* H8S/2000 execution context for recompiled Cybiko code.
+ *
+ * The recompiled image is one C function with a label per instruction, so this
+ * holds only architectural state. There is no instruction pointer to maintain
+ * except at a computed transfer, where `pc` is set and the generated dispatch
+ * takes over.
+ *
+ * Registers are held as eight uint32 and accessed through masks, because the
+ * H8S aliases them three ways: ER0 is E0:R0, and R0 is R0H:R0L. An 8-bit write
+ * has to leave the other 24 bits alone, so the emitter never assigns a whole
+ * register unless the instruction really is 32-bit.
+ */
+#ifndef CYBIKORECOMP_H8S_H
+#define CYBIKORECOMP_H8S_H
+
+#include <stdint.h>
+
+/* Advanced mode: 24-bit addresses. 16 MB of flat memory is less than the
+ * machine this runs on has in a browser tab, and it makes every access a
+ * bounds-masked array index rather than a region search. */
+#define CY_ADDR_BITS 24
+#define CY_ADDR_MASK 0x00FFFFFFu
+#define CY_MEM_SIZE  (1u << CY_ADDR_BITS)
+
+typedef struct cy {
+    uint32_t e[8];            /* ER0-ER7; ER7 is the stack pointer */
+    uint32_t pc;              /* only meaningful at a computed transfer */
+
+    uint8_t  nf, zf, vf, cf;  /* CCR condition flags, one byte each */
+    uint8_t  hf;              /* half carry, for the decimal adjust ops */
+    uint8_t  iff;             /* interrupt mask */
+
+    uint8_t  trapped;         /* dispatched somewhere with no code */
+    uint32_t trap_pc;
+    uint64_t cycles;
+
+    uint8_t *mem;             /* CY_MEM_SIZE bytes, big-endian contents */
+} cy_t;
+
+int  cy_init(cy_t *c);
+void cy_free(cy_t *c);
+
+/* Load an image at an address. Returns 0 on success. */
+int  cy_load(cy_t *c, uint32_t addr, const void *data, uint32_t len);
+
+/* Big-endian, because the H8S is. */
+uint8_t  cy_read8(cy_t *c, uint32_t a);
+uint16_t cy_read16(cy_t *c, uint32_t a);
+uint32_t cy_read32(cy_t *c, uint32_t a);
+void cy_write8(cy_t *c, uint32_t a, uint8_t v);
+void cy_write16(cy_t *c, uint32_t a, uint16_t v);
+void cy_write32(cy_t *c, uint32_t a, uint32_t v);
+
+/* Generated. Runs from c->pc until a trap or `budget` cycles. */
+void cy_run(cy_t *c, uint64_t budget);
+
+/* Evaluate a condition code 0-15, for the branch forms the emitter does not
+ * special-case. Order is the H8S Bcc table: bra brn bhi bls bcc bcs bne beq
+ * bvc bvs bpl bmi bge blt bgt ble. */
+int cy_cond(const cy_t *c, int cc);
+
+/* --- flag helpers used by generated code -------------------------------- */
+
+#define CY_MASK_b 0xFFu
+#define CY_MASK_w 0xFFFFu
+#define CY_MASK_l 0xFFFFFFFFu
+#define CY_SIGN_b 0x80u
+#define CY_SIGN_w 0x8000u
+#define CY_SIGN_l 0x80000000u
+
+/* N and Z from a result; V cleared, as the logic and move ops do. */
+#define SETNZ(res, sz)                                                    \
+    do {                                                                  \
+        uint32_t cy__r = (uint32_t)(res) & CY_MASK_##sz;                  \
+        c->nf = (cy__r & CY_SIGN_##sz) != 0;                              \
+        c->zf = (cy__r == 0);                                             \
+        c->vf = 0;                                                        \
+    } while (0)
+
+/* Carry out of the top bit, and signed overflow: the operands agreed on sign
+ * and the result disagrees with them. */
+#define SETFLAGS_ADD(a, b, res, sz)                                       \
+    do {                                                                  \
+        uint32_t cy__a = (uint32_t)(a) & CY_MASK_##sz;                    \
+        uint32_t cy__b = (uint32_t)(b) & CY_MASK_##sz;                    \
+        uint32_t cy__r = (uint32_t)(res) & CY_MASK_##sz;                  \
+        c->cf = ((cy__a + cy__b) > CY_MASK_##sz);                         \
+        c->vf = (((cy__a ^ cy__r) & (cy__b ^ cy__r) & CY_SIGN_##sz) != 0);\
+        c->nf = (cy__r & CY_SIGN_##sz) != 0;                              \
+        c->zf = (cy__r == 0);                                             \
+        c->hf = (((cy__a & 0xF) + (cy__b & 0xF)) > 0xF);                  \
+    } while (0)
+
+/* Borrow, and overflow when the operands differed in sign and the result took
+ * the subtrahend's. */
+#define SETFLAGS_SUB(a, b, res, sz)                                       \
+    do {                                                                  \
+        uint32_t cy__a = (uint32_t)(a) & CY_MASK_##sz;                    \
+        uint32_t cy__b = (uint32_t)(b) & CY_MASK_##sz;                    \
+        uint32_t cy__r = (uint32_t)(res) & CY_MASK_##sz;                  \
+        c->cf = (cy__a < cy__b);                                          \
+        c->vf = (((cy__a ^ cy__b) & (cy__a ^ cy__r) & CY_SIGN_##sz) != 0);\
+        c->nf = (cy__r & CY_SIGN_##sz) != 0;                              \
+        c->zf = (cy__r == 0);                                             \
+        c->hf = ((cy__a & 0xF) < (cy__b & 0xF));                          \
+    } while (0)
+
+/* CMP is SUB without the writeback, so the flags are identical. */
+#define SETFLAGS_CMP(a, b, res, sz) SETFLAGS_SUB(a, b, res, sz)
+
+/* An instruction the emitter has not learned yet. It stops rather than
+ * guessing, so a run that reaches one says exactly which opcode to add next
+ * instead of quietly computing the wrong thing. */
+#define UNIMPLEMENTED(addr)                                               \
+    do {                                                                  \
+        c->trapped = 2;                                                   \
+        c->trap_pc = (addr);                                              \
+        return;                                                           \
+    } while (0)
+
+#endif

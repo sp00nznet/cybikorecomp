@@ -342,10 +342,10 @@ def _decode_6(d, a, n):
     b0, b1 = d[a], d[a + 1]
     lo = b0 & 0xF
 
-    if lo in (0x0, 0x1, 0x2, 0x3):        # BSET/BNOT/BCLR/BTST Rn,<ea>
+    if lo in (0x0, 0x1, 0x2, 0x3):        # BSET/BNOT/BCLR/BTST Rm, Rd
         m = ("bset", "bnot", "bclr", "btst")[lo]
-        return Insn(a, 2, m, (r8(b1 >> 4), "@%s" % r32(b1 & 7)),
-                    raw=d[a:a + 2], sd=(("ind", "b", b1 & 7), R("b", b1 >> 4)))
+        return Insn(a, 2, m, (r8(b1 >> 4), r8(b1 & 0xF)), raw=d[a:a + 2],
+                    sd=(R("b", b1 & 0xF), R("b", b1 >> 4)))
     if lo in (0x4, 0x5, 0x6):             # OR/XOR/AND .w Rs,Rd
         m = ("or", "xor", "and")[lo - 4]
         return Insn(a, 2, m + ".w", (r16(b1 >> 4), r16(b1 & 0xF)),
@@ -469,10 +469,17 @@ def decode(d, a):
         return Insn(a, 2, "das", (r8(b1 & 0xF),), raw=d[a:a + 2])
 
     # --- 0x2x / 0x3x : MOV.B @aa:8 ---
-    if hi == 0x2:
-        return Insn(a, 2, "mov.b", ("@0x%02X" % b1, r8(lo)), raw=d[a:a + 2])
-    if hi == 0x3:
-        return Insn(a, 2, "mov.b", (r8(lo), "@0x%02X" % b1), raw=d[a:a + 2])
+    # @aa:8 is the top page: 0x4C means 0xFFFF4C. It is how the compiler
+    # reaches the I/O block in two bytes.
+    if hi in (0x2, 0x3):
+        addr = 0xFFFF00 | b1
+        mem = ("abs", "b", addr)
+        reg = ("r", "b", lo)
+        if hi == 0x2:
+            return Insn(a, 2, "mov.b", ("@0x%06X" % addr, r8(lo)),
+                        raw=d[a:a + 2], sd=(reg, mem))
+        return Insn(a, 2, "mov.b", (r8(lo), "@0x%06X" % addr),
+                    raw=d[a:a + 2], sd=(mem, reg))
 
     # --- 0x4x : Bcc d:8 ---
     if hi == 0x4:
@@ -531,8 +538,10 @@ def decode(d, a):
 
     # --- 0x7x ---
     if b0 in (0x70, 0x71, 0x72, 0x73):
-        return Insn(a, 2, ("bset", "bnot", "bclr", "btst")[b0 - 0x70],
-                    (), raw=d[a:a + 2])
+        m = ("bset", "bnot", "bclr", "btst")[b0 - 0x70]
+        bit = (b1 >> 4) & 7
+        return Insn(a, 2, m, ("#%d" % bit, r8(b1 & 0xF)), raw=d[a:a + 2],
+                    sd=(R("b", b1 & 0xF), I("b", bit)))
     if b0 in (0x74, 0x75, 0x76, 0x77):
         return Insn(a, 2, ("bor", "bxor", "band", "bld")[b0 - 0x74],
                     (), raw=d[a:a + 2])

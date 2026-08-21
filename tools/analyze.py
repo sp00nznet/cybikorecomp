@@ -69,7 +69,20 @@ def prologue_seeds(d, base=0, lo=0, hi=None):
     return out
 
 
-def analyze(d, base=0, seeds=None):
+# What is actually mapped in a combined Cybiko image. Everything else is the
+# 0xFF fill cyimage.py pads with -- and 0xFF decodes as a perfectly valid
+# `mov.b #imm, r7l`, so a trace that wanders into padding never stops and
+# reports more "code" than the image contains. Ask before following.
+CYBIKO_REGIONS = ((0x000000, 0x008000), (0x200000, 0x240000))
+
+
+def in_region(a, regions):
+    if not regions:
+        return True
+    return any(lo <= a < hi for lo, hi in regions)
+
+
+def analyze(d, base=0, seeds=None, regions=None):
     """Trace an image loaded at `base`.
 
     `seeds` supplies entry points for images that carry no vector table --
@@ -97,7 +110,7 @@ def analyze(d, base=0, seeds=None):
         a = work.pop()
         if a in reached:
             continue
-        if a >= len(d):
+        if a >= len(d) or not in_region(a, regions):
             unresolved["target outside the image"].append(a)
             continue
         i = decode(d, a)

@@ -197,8 +197,12 @@ def _decode_6(d, a, n):
         sz = ".b" if lo == 0xA else ".w"
         sub = b1 & 0xF0
         if sub in (0x00, 0x80):
+            if n < 4:
+                return None
             return Insn(a, 4, "mov" + sz, ("@0x%04X" % u16(d, a + 2),),
                         raw=d[a:a + 4])
+        if n < 6:
+            return None
         return Insn(a, 6, "mov" + sz, ("@0x%06X" % u24(d, a + 3),),
                     raw=d[a:a + 6])
     if lo == 0xC:                         # MOV.B @ERs+,Rd / Rs,@-ERd
@@ -211,6 +215,8 @@ def _decode_6(d, a, n):
         m = "pop.w" if reg == 7 else "mov.w"
         return Insn(a, 2, m, (r16(b1 & 0xF),), raw=d[a:a + 2])
     if lo in (0xE, 0xF):                  # MOV @(d:16,ERs)
+        if n < 4:
+            return None
         sz = ".b" if lo == 0xE else ".w"
         return Insn(a, 4, "mov" + sz, (), raw=d[a:a + 4])
     return None
@@ -233,7 +239,7 @@ def decode(d, a):
     """
     n = len(d) - a
     if n < 2:
-        return Insn(a, n, "(truncated)", kind=K_UNK, raw=d[a:])
+        return Insn(a, max(1, n), "(truncated)", kind=K_UNK, raw=d[a:])
     b0, b1 = d[a], d[a + 1]
     hi, lo = b0 >> 4, b0 & 0xF
 

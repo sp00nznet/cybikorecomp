@@ -76,3 +76,76 @@ forward:
    ROM's data encoding a non-problem.
 
 The second is more in keeping with how this library usually works.
+
+---
+
+## The flash image
+
+`flash_v1246.bin` is 540,672 bytes — 2048 pages of 264, an AT45DB041 serial
+flash dump. It is **not a monolithic OS image**. It is a filesystem holding the
+same `Cy` containers a `.app` uses: 38 magic hits, **34 of which parse in
+place** with sensible member names (`0.help`, `root.ico`, `root.inf`,
+`main.e`). CyOS ships its own applications the same way third-party ones ship.
+
+Consequences:
+
+- There is no contiguous "CyOS code" to point a recompiler at. There are dozens
+  of containers, and their code members are packed.
+- A code-likelihood sweep over the whole flash finds no uncompressed code. The
+  one region that scored high, `0x081000`, is a **string table** — ASCII bytes
+  decoding as plausible opcodes. Worth naming as a trap: any "is this code?"
+  heuristic will rank text highly unless text is excluded first.
+
+## Method `0x02` is real compression
+
+Worth ruling out the cheaper explanation first: `0x02` could have been an
+*executable* header, with the u32 being a memory-image size including BSS
+rather than an unpacked size, and the payload being raw code. It is not.
+
+Scoring payloads by how often a linear decode produces function-shaped
+instructions:
+
+| region | score |
+|---|---|
+| known H8S code (boot ROM `0x0D6A`–`0x2000`) | 0.466 |
+| known data (boot ROM `0x5E00`–`0x6000`) | 0.021 |
+| `main.e` payloads, median over 40 apps | **0.024** |
+
+`main.e` payloads are statistically indistinguishable from data. The codec is
+real and has to be understood or executed.
+
+## Hunting the decompressor
+
+Not found yet, and the boot ROM has been searched two ways.
+
+A survey of *reached* functions found nothing shift-heavy enough — but that
+only covers 34.5% of the image, so it proves little. A sliding-window scan over
+a linear decode of the whole 25 KB ranked six candidates by shift density, back
+edges and absence of calls.
+
+The best of them, `0x002A26`, turned out to be the **flash driver**, not a
+decompressor:
+
+```
+002A28  and.l #0x000003FC, er2      ; (byte ^ crc) & 0xFF, times 4
+002A2E  mov.l @er4, er3             ; table lookup
+002A32  shlr x4                     ; CRC-32, table-driven
+002A56  bne 0x002A16
+002A8A  or.l #0x82000000, er5       ; AT45DB opcode 0x82
+002A96  mov.b @0x5E, r2l            ; poll SPI status
+002A9A  beq 0x002A96
+```
+
+That is a table-driven CRC-32 feeding a page-program command. Useful to have
+identified — it is how the boot ROM writes flash — but the unpacker is
+elsewhere.
+
+Two ways left, in order of expected cost:
+
+1. **Watch it happen.** MAME emulates the Cybiko (`cybikov1`) and its debugger
+   can break on flash reads and trace. The routine that consumes a packed
+   stream will announce itself. This is cheap and does not depend on resolving
+   any indirect call.
+2. **Resolve more of the boot ROM.** 65% of it is unreached behind 47
+   `jsr @ERn`. The unpacker is plausibly in there, and this work is needed
+   anyway.

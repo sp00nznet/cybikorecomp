@@ -32,7 +32,8 @@ typedef struct cy {
 
     uint8_t  trapped;         /* dispatched somewhere with no code */
     uint32_t trap_pc;
-    uint64_t cycles;
+    uint64_t cycles;          /* dispatch iterations, not instructions:
+                               * straight-line runs inside a chunk are free */
 
     uint8_t *mem;             /* CY_MEM_SIZE bytes, big-endian contents */
 } cy_t;
@@ -107,6 +108,29 @@ int cy_cond(const cy_t *c, int cc);
 
 /* CMP is SUB without the writeback, so the flags are identical. */
 #define SETFLAGS_CMP(a, b, res, sz) SETFLAGS_SUB(a, b, res, sz)
+
+/* CCR as the hardware packs it. The flags live in separate bytes for speed,
+ * so the ops that treat the whole register as a value have to pack and unpack:
+ *
+ *   bit  7   6   5   4   3   2   1   0
+ *        I   UI  H   U   N   Z   V   C
+ *
+ * U and UI are user bits with no meaning to the CPU; they are kept only so a
+ * store-then-load round-trips. */
+#define CY_CCR_GET(c)                                                     \
+    ((uint8_t)(((c)->iff << 7) | ((c)->hf << 5) | ((c)->nf << 3)          \
+             | ((c)->zf << 2) | ((c)->vf << 1) | (c)->cf))
+
+#define CY_CCR_SET(c, v)                                                  \
+    do {                                                                  \
+        uint8_t cy__v = (uint8_t)(v);                                     \
+        (c)->iff = (cy__v >> 7) & 1;                                      \
+        (c)->hf  = (cy__v >> 5) & 1;                                      \
+        (c)->nf  = (cy__v >> 3) & 1;                                      \
+        (c)->zf  = (cy__v >> 2) & 1;                                      \
+        (c)->vf  = (cy__v >> 1) & 1;                                      \
+        (c)->cf  =  cy__v       & 1;                                      \
+    } while (0)
 
 /* An instruction the emitter has not learned yet. It stops rather than
  * guessing, so a run that reaches one says exactly which opcode to add next

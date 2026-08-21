@@ -390,7 +390,8 @@ def decode(d, a):
         return Insn(a, 2, "stc" if b0 == 0x02 else "ldc", (), raw=d[a:a + 2])
     if b0 in (0x04, 0x05, 0x06, 0x07):
         m = {0x04: "orc", 0x05: "xorc", 0x06: "andc", 0x07: "ldc"}[b0]
-        return Insn(a, 2, m, ("#0x%02X" % b1, "ccr"), raw=d[a:a + 2])
+        return Insn(a, 2, m, ("#0x%02X" % b1, "ccr"), raw=d[a:a + 2],
+                    sd=(("ccr", "b", 0), I("b", b1)))
     if b0 == 0x08:
         return Insn(a, 2, "add.b", (r8(b1 >> 4), r8(b1 & 0xF)), raw=d[a:a + 2],
                     sd=(R("b", b1 & 0xF), R("b", b1 >> 4)))

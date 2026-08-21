@@ -35,17 +35,26 @@ IO_BASE, IRQ_TABLE, IRQ_COUNT = 0xFFE000, 0xFFEC90, 11
 
 
 def find(d, code):
-    """Runs of >= MIN_ENTRIES consecutive pointers into `code`."""
+    """Runs of >= MIN_ENTRIES consecutive pointers into `code`.
+
+    Entries must also be mostly *distinct*. A vtable lists different methods;
+    a run of forty copies of the same address is a filled array that happens
+    to hold a code pointer. Without this the detector inflates as the known
+    code set grows -- seeding with recorded PCs took it from 99 tables holding
+    650 pointers to 372 holding 15,108, for only 21 more distinct targets.
+    """
     out = []
     a = RAM_LO
     while a < RAM_HI - 4:
-        n = 0
-        while a + 4 * n + 4 <= RAM_HI:
-            if struct.unpack_from(">I", d, a + 4 * n)[0] in code:
-                n += 1
+        vals = []
+        while a + 4 * len(vals) + 4 <= RAM_HI:
+            v = struct.unpack_from(">I", d, a + 4 * len(vals))[0]
+            if v in code:
+                vals.append(v)
             else:
                 break
-        if n >= MIN_ENTRIES:
+        n = len(vals)
+        if n >= MIN_ENTRIES and len(set(vals)) >= max(MIN_ENTRIES, n // 2):
             out.append((a, n))
             a += 4 * n
         else:
@@ -63,13 +72,15 @@ def irq_handlers(io):
             for i in range(IRQ_COUNT)}
 
 
-def resolve(d, io=None, rounds=8):
+def resolve(d, io=None, rounds=8, pcfile=None):
     """Trace to a fixpoint, discovering vtables as more code becomes known."""
     seeds = set(v for _, v in analyze.vectors(d))
     seeds |= analyze.prologue_seeds(d, 0, 0x0000, 0x8000)
     seeds |= analyze.prologue_seeds(d, 0, RAM_LO, RAM_HI)
     if io:
         seeds |= irq_handlers(io)
+    if pcfile:
+        seeds |= analyze.pc_seeds(pcfile)
 
     prev, runs, result = -1, [], None
     for _ in range(rounds):
@@ -88,9 +99,10 @@ def main(argv):
         print(__doc__)
         return 2
     d = analyze.load(argv[0])
-    io = open(argv[1], "rb").read() if len(argv) > 1 else None
+    io = open(argv[1], "rb").read() if len(argv) > 1 and argv[1] != "--pc" else None
+    pcfile = argv[argv.index("--pc") + 1] if "--pc" in argv else None
 
-    (ops, reached, entries, calls, unresolved), runs = resolve(d, io)
+    (ops, reached, entries, calls, unresolved), runs = resolve(d, io, pcfile=pcfile)
     ptrs = sum(n for _, n in runs)
 
     print("vtables        %d, holding %d pointers (%d distinct targets)"

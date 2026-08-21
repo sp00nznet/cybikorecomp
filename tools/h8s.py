@@ -557,7 +557,11 @@ def decode(d, a):
         if r:
             return r
     if b0 == 0x7B and n >= 4:
-        return Insn(a, 4, "eepmov", (), raw=d[a:a + 4])
+        # EEPMOV: block transfer, @ER5 -> @ER6, count in R4L or R4.
+        # 7B 5C 59 8F is the byte-count form, 7B D4 59 8F the word-count one.
+        wide = (b1 & 0x80) != 0
+        return Insn(a, 4, "eepmov." + ("w" if wide else "b"),
+                    ("@er5", "@er6"), raw=d[a:a + 4])
     if b0 in (0x7C, 0x7D, 0x7E, 0x7F):
         r = _decode_7c(d, a, n)
         if r:

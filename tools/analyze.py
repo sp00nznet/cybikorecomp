@@ -46,6 +46,27 @@ def vectors(d):
     return out
 
 
+def pc_seeds(path):
+    """Addresses actually executed, captured from a run under MAME.
+
+    Static tracing only finds code whose entry is a constant somewhere. On a
+    register machine that misses real code entirely -- the boot ROM reaches
+    0x00204C through a computed path, and nothing in the image points at it.
+    A recorded run has no such blind spot for the paths it took, and no
+    guesswork at all: every address in the file was fetched as an instruction.
+
+    It is the complement of prologue_seeds rather than a replacement. A trace
+    covers what ran; prologues find functions that have not run yet.
+    """
+    out = set()
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                out.add(int(line, 16))
+    return out
+
+
 def prologue_seeds(d, base=0, lo=0, hi=None):
     """Addresses that look like the start of a function.
 
@@ -152,6 +173,8 @@ def main(argv):
     seeds = None
     if "--prologues" in argv:
         seeds = prologue_seeds(d, base)
+    if "--pc" in argv:
+        seeds = (seeds or set()) | pc_seeds(argv[argv.index("--pc") + 1])
 
     ops, reached, entries, calls, unresolved = analyze(d, base, seeds)
 

@@ -139,6 +139,17 @@ def body(i):
     if base == "nop":
         return []
 
+    # EEPMOV is the H8's block move: copy from @ER5 to @ER6 until the counter
+    # in R4 runs out, leaving it at zero. It is what the boot ROM's memcpy is
+    # built out of, so nothing gets far without it.
+    if base == "eepmov":
+        cnt = "(E[4] & 0xFFFF)" if size == "w" else "((E[4] >> 8) & 0xFF)"
+        clear = ("E[4] = E[4] & 0xFFFF0000U;" if size == "w"
+                 else "E[4] = E[4] & 0xFFFF00FFU;")
+        return ["{ uint32_t n = %s;" % cnt,
+                "  while (n--) { MWB(E[6], MRB(E[5])); E[5]++; E[6]++; }",
+                "  %s }" % clear]
+
     # The condition-code register as a value. ORC sets bits, ANDC clears the
     # ones not named, XORC toggles, LDC replaces outright.
     if base in ("orc", "andc", "xorc", "ldc") and i.sd:
@@ -318,13 +329,24 @@ def emit_chunk(k, ch, ops, where, w):
     covered = skipped = stranded = 0
     mine = set(ch)
 
-    def go(target):
-        """Jump inside this chunk, or hand control back to the run loop."""
-        if target in mine:
-            return "goto L_%06X;" % target
-        return "c->pc = 0x%06XU; return;" % target
+    def go(target, frm=None):
+        """Jump inside this chunk, or hand control back to the run loop.
 
-    w("static void cy_chunk%d(cy_t *c)\n{\n" % k)
+        A *backward* jump inside the chunk gets a budget check first. Without
+        one a loop whose body never leaves the chunk never returns to cy_run,
+        so the budget is never tested and the program hangs -- which is what
+        the first run that got as far as the boot ROM's polling loops did.
+        Every loop has a backward edge, so checking there is sufficient, and
+        forward branches stay free.
+        """
+        if target not in mine:
+            return "c->pc = 0x%06XU; return;" % target
+        if frm is not None and target <= frm:
+            return ("if (c->cycles++ >= budget) { c->pc = 0x%06XU; return; } "
+                    "goto L_%06X;" % (target, target))
+        return "goto L_%06X;" % target
+
+    w("static void cy_chunk%d(cy_t *c, uint64_t budget)\n{\n" % k)
     w("    uint32_t *E = c->e;\n    uint32_t t;\n    (void)t; (void)E;\n")
     w("    switch (c->pc) {\n")
     for a in ch:
@@ -343,13 +365,13 @@ def emit_chunk(k, ch, ops, where, w):
                     "bcc": "!c->cf", "bmi": "c->nf", "bpl": "!c->nf",
                     "bvs": "c->vf", "bvc": "!c->vf"}.get(i.mnem.split(".")[0])
             if i.kind == K_JMP:
-                w("    %s\n" % go(i.target))
+                w("    %s\n" % go(i.target, a))
             elif cond:
-                w("    if (%s) { %s }\n" % (cond, go(i.target)))
+                w("    if (%s) { %s }\n" % (cond, go(i.target, a)))
             else:
                 w("    if (cy_cond(c, %d)) { %s }\n"
                   % (i.raw[0] & 0xF if i.raw[0] >> 4 == 4 else i.raw[1] >> 4,
-                     go(i.target)))
+                     go(i.target, a)))
             covered += 1
             continue
 
@@ -358,7 +380,7 @@ def emit_chunk(k, ch, ops, where, w):
             if i.target is not None:
                 if i.target not in where:
                     stranded += 1
-                w("    %s\n" % go(i.target))
+                w("    %s\n" % go(i.target, a))
             else:
                 w("    c->pc = %s & 0xFFFFFF; return;\n" % indirect_target(i))
             covered += 1
@@ -406,14 +428,14 @@ def emit(d, ops, reached, entries, out):
     covered = skipped = stranded = 0
 
     for k in range(len(chunks)):
-        w("static void cy_chunk%d(cy_t *c);\n" % k)
+        w("static void cy_chunk%d(cy_t *c, uint64_t budget);\n" % k)
 
     w("\nvoid cy_run(cy_t *c, uint64_t budget)\n{\n")
     w("    while (!c->trapped) {\n")
     w("        if (c->cycles++ >= budget)\n            return;\n")
     w("        switch (cy_chunk_of(c->pc)) {\n")
     for k in range(len(chunks)):
-        w("        case %d: cy_chunk%d(c); break;\n" % (k, k))
+        w("        case %d: cy_chunk%d(c, budget); break;\n" % (k, k))
     w("        default: c->trapped = 1; c->trap_pc = c->pc; return;\n")
     w("        }\n    }\n}\n\n")
 
@@ -440,7 +462,9 @@ def main(argv):
     if "--io" in argv:
         io = open(argv[argv.index("--io") + 1], "rb").read()
 
-    (ops, reached, entries, calls, unresolved), runs = vtables.resolve(d, io)
+    pcfile = argv[argv.index("--pc") + 1] if "--pc" in argv else None
+    (ops, reached, entries, calls, unresolved), runs = vtables.resolve(
+        d, io, pcfile=pcfile)
     with open(argv[1], "w", encoding="utf-8") as f:
         covered, skipped, stranded, nchunks = emit(d, ops, reached, entries, f)
 

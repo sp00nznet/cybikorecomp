@@ -23,18 +23,20 @@ first job is measuring it honestly rather than assuming.
 
 ## Status
 
-Early. The decoder and the container format are done and self-checking; nothing
-is recompiled yet.
+CyOS is extracted, traced and translated to C. It does not run yet — there are
+no peripherals behind the memory map.
 
 | Stage | State |
 |---|---|
 | **`.app` container format** — parse, list, extract | ✅ 410/410 apps parse |
-| **H8S/2000 decoder** — lengths, control flow, operands | ✅ 0 undecodable in the boot ROM |
-| **Control-flow analysis** — trace from the vector table | ✅ complete, honest numbers below |
-| **`0x02` compression** — the codec every packed member uses | 🔨 unidentified |
-| **Indirect-call resolution** — 47 `jsr @ERn` in the boot ROM alone | ⬜ not started |
-| **C emitter** | ⬜ not started |
-| **Runtime** — H8S peripherals, LCD, keyboard, radio | ⬜ not started |
+| **H8S/2000 decoder** — lengths, control flow, operands | ✅ 0 undecodable; 97.8% with structured operands |
+| **Control-flow analysis** | ✅ 39,841 instructions, 1,863 entry points |
+| **CyOS extraction** — unpacked, out of MAME | ✅ see [docs/CYOS.md](docs/CYOS.md) |
+| **Indirect calls** — 227 sites | ✅ three mechanisms, see [docs/INDIRECT.md](docs/INDIRECT.md) |
+| **C emitter** | ✅ 99.2% of traced instructions |
+| **Runtime** — CPU state, memory, flags | ✅ enough to compile |
+| **Peripherals** — LCD, keyboard, timers, flash, radio | ⬜ not started |
+| **`0x02` compression** | 🔨 unidentified, and no longer blocking |
 
 ```
 $ python tests/test_decode.py cyrom112.bin apps/
@@ -44,6 +46,27 @@ branches ok  (relative targets, and indirects report no target)
 rom      ok  (2763 instructions, 101 entries, 110 stm/ldm pairs, 0 undecodable)
 apps     ok  (410 containers, 11011 members: 2373 stored, 8638 packed)
 ```
+
+## The short version
+
+The Cybiko is the opposite of the last target in this library. The
+[Tamagotchi](https://github.com/sp00nznet/tamarecomp) was recompilable because
+its 4-bit core had nowhere to put a computed address, so every jump target was
+a build-time constant. Here almost nothing is: the H8S is a register machine
+running C++, and 227 call sites go through a register.
+
+That turned out not to matter. The emitter puts a label on every traced
+instruction and one dense dispatch switch at the bottom, so `jsr @ERn` becomes
+a switch on the register and cannot land somewhere without code. Resolving the
+targets — 99 vtables, 641 of them — makes that dispatch *small*, not correct.
+
+Two other things that looked like walls were not:
+
+- **CyOS is packed with an unidentified codec.** It also unpacks itself at
+  every boot, so MAME dumps the plaintext. [docs/CYOS.md](docs/CYOS.md).
+- **65% of the boot ROM was unreachable.** It was calls into CyOS and vice
+  versa; analysing the two as one address space took unresolved transfers from
+  2,533 to 227. [docs/INDIRECT.md](docs/INDIRECT.md).
 
 ## What the boot ROM looks like
 
@@ -132,18 +155,26 @@ cybikorecomp/
 ├── tools/
 │   ├── h8s.py           H8S/2000 decoder — lengths, operands, control flow
 │   ├── analyze.py       trace from the vector table, report what is unresolved
-│   └── cyapp.py         the .app container: parse, list, extract
+│   ├── vtables.py       find the tables the indirect calls dispatch through
+│   ├── cyimage.py       glue the boot ROM and SRAM into one address space
+│   ├── emit.py          traced image → C
+│   ├── cyapp.py         the .app container: parse, list, extract
+│   ├── mame_dump.lua    dump CyOS out of a running MAME
+│   └── mame_probe.lua   hunt a routine by how it writes memory
 ├── tests/
 │   └── test_decode.py   encoding checks, plus whole-ROM and whole-library ones
-├── include/cybikorecomp/
-├── src/
-└── docs/
+├── include/cybikorecomp/h8s.h    CPU state, memory, flag macros
+├── src/mem.c                    memory and condition codes
+└── docs/  CYOS.md  INDIRECT.md  FORMATS.md
 ```
 
 ## Usage
 
 ```sh
+python tools/cyimage.py  cyrom112.bin cyram.bin -o cybiko.img
 python tools/analyze.py  cyrom112.bin          # what the boot ROM's flow looks like
+python tools/vtables.py  cybiko.img cyio.bin   # the indirect-call target tables
+python tools/emit.py     cybiko.img cyos.c --io cyio.bin
 python tools/cyapp.py    Calculator.app        # list a container
 python tools/cyapp.py    Calculator.app -x out # extract its stored members
 python tests/test_decode.py cyrom112.bin apps/ # self-checks

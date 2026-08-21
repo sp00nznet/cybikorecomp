@@ -11,7 +11,11 @@ or behind a pointer, and no amount of staring at one instruction will tell you
 where they go. The number this tool prints is therefore the honest one: how
 much of the image can be reached *without guessing*.
 
-    python tools/analyze.py <image.bin> [load_address]
+    python tools/analyze.py <image.bin>
+    python tools/analyze.py cyram.bin --base 0x200000 --prologues
+
+The second form is for an image dumped out of RAM, which has no vector table
+to start from -- see docs/CYOS.md.
 """
 import sys
 from collections import defaultdict
@@ -42,7 +46,36 @@ def vectors(d):
     return out
 
 
-def analyze(d, base=0):
+def prologue_seeds(d, base=0, lo=0, hi=None):
+    """Addresses that look like the start of a function.
+
+    An image dumped out of RAM has no vector table and no symbols, so entry
+    points have to be guessed -- and the compiler makes that easy, because it
+    opens almost every non-leaf function by saving registers:
+
+        01 n0 6D Fm      stm.l (ERm-ERm+n), @-sp
+
+    Seeding a trace with all of them, then letting the trace discover the rest
+    through direct calls, gets most of an image without any value analysis.
+    Leaf functions that save nothing are missed, and are picked up later only
+    if something calls them directly.
+    """
+    hi = hi if hi is not None else len(d)
+    out = set()
+    for a in range(lo, min(hi, len(d) - 4), 2):
+        if (d[a] == 0x01 and d[a + 2] == 0x6D
+                and (d[a + 1] & 0x8F) == 0 and (d[a + 3] & 0x80)):
+            out.add(base + a)
+    return out
+
+
+def analyze(d, base=0, seeds=None):
+    """Trace an image loaded at `base`.
+
+    `seeds` supplies entry points for images that carry no vector table --
+    a CyOS image dumped out of RAM, for instance, whose entry points come
+    from the pointer table at the head of the flash.
+    """
     ops = {}
     reached = set()
     entries = set()
@@ -50,9 +83,15 @@ def analyze(d, base=0):
     calls = set()
 
     work = []
-    for idx, v in vectors(d):
-        entries.add(v)
-        work.append(v)
+    if seeds:
+        for v in seeds:
+            if 0 <= v - base < len(d):
+                entries.add(v - base)
+                work.append(v - base)
+    else:
+        for idx, v in vectors(d):
+            entries.add(v)
+            work.append(v)
 
     while work:
         a = work.pop()
@@ -94,7 +133,14 @@ def main(argv):
     path = argv[0]
     d = load(path)
 
-    ops, reached, entries, calls, unresolved = analyze(d)
+    base = 0
+    if "--base" in argv:
+        base = int(argv[argv.index("--base") + 1], 0)
+    seeds = None
+    if "--prologues" in argv:
+        seeds = prologue_seeds(d, base)
+
+    ops, reached, entries, calls, unresolved = analyze(d, base, seeds)
 
     # bytes covered, not instructions -- variable length makes the byte count
     # the meaningful one
@@ -103,7 +149,9 @@ def main(argv):
     while tail > 0 and d[tail - 1] == 0xFF:
         tail -= 1
 
-    print("image           %s" % path)
+    print("image           %s%s" % (path, "  base 0x%06X" % base if base else ""))
+    if seeds is not None:
+        print("seeded with     %d function prologues" % len(seeds))
     print("size            %d bytes (0x%X); %d before the 0xFF padding"
           % (len(d), len(d), tail))
     print("vectors filled  %d" % len(vectors(d)))

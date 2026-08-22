@@ -62,8 +62,16 @@ def pc_seeds(path):
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if line:
-                out.add(int(line, 16))
+            if not line:
+                continue
+            a = int(line, 16)
+            # MAME reports PC = 0 for the fetch that loads the reset vector,
+            # so a raw capture always contains address 0 -- which is the
+            # vector table, not code. Seeding on it makes the trace decode 256
+            # longwords of addresses as instructions and walk off into them.
+            if a < VECTOR_COUNT * 4:
+                continue
+            out.add(a)
     return out
 
 

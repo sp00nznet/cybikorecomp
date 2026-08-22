@@ -32,11 +32,43 @@ typedef struct cy {
 
     uint8_t  trapped;         /* dispatched somewhere with no code */
     uint32_t trap_pc;
+    /* A ring of recent dispatch targets. When a trap says "wanted 0x00004E"
+     * the useful question is what was running just before, and reconstructing
+     * that from the image by hand is far more work than keeping sixteen. */
+    uint32_t recent[16];
+    uint32_t recent_n;
     uint64_t cycles;          /* dispatch iterations, not instructions:
                                * straight-line runs inside a chunk are free */
 
     uint8_t *mem;             /* CY_MEM_SIZE bytes, big-endian contents */
+
+    /* Whatever the boot ROM sends out of SCI2, which is wired to the debug
+     * serial port on real hardware. Capturing it is the cheapest window into
+     * what the firmware thinks it is doing. */
+    char     serial[4096];
+    uint32_t serial_len;
 } cy_t;
+
+/* --- H8S/2246 on-chip peripherals ---------------------------------------
+ *
+ * Only the ones the boot ROM waits on. It polls SSR2 half a million times
+ * before doing anything else, because it will not proceed until the serial
+ * transmitter says it is ready. */
+#define CY_WDT_TCSR  0xFFFF3Cu    /* watchdog */
+
+#define CY_SMR2      0xFFFF88u    /* serial mode */
+#define CY_BRR2      0xFFFF89u    /* baud rate */
+#define CY_SCR2      0xFFFF8Au    /* control: TE/RE enable */
+#define CY_TDR2      0xFFFF8Bu    /* transmit data */
+#define CY_SSR2      0xFFFF8Cu    /* status */
+#define CY_RDR2      0xFFFF8Du    /* receive data */
+
+/* SSR bits. TDRE says the transmit register is free, TEND that the last byte
+ * has gone. Reporting both always is what a port with nothing attached and
+ * infinite speed looks like. */
+#define CY_SSR_TDRE  0x80u
+#define CY_SSR_RDRF  0x40u
+#define CY_SSR_TEND  0x04u
 
 int  cy_init(cy_t *c);
 void cy_free(cy_t *c);

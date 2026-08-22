@@ -53,6 +53,11 @@ int main(int argc, char **argv)
            c.e[4], c.e[5], c.e[6], c.e[7]);
     printf("  N=%d Z=%d V=%d C=%d\n", c.nf, c.zf, c.vf, c.cf);
 
+    if (c.serial_len) {
+        printf("\nserial output (%u bytes):\n---\n%.*s\n---\n",
+               c.serial_len, (int)c.serial_len, c.serial);
+    }
+
     if (c.trapped == 2) {
         printf("UNIMPLEMENTED opcode at 0x%06X -- that is the next one to add\n",
                c.trap_pc);
@@ -60,6 +65,11 @@ int main(int argc, char **argv)
     }
     if (c.trapped) {
         printf("FAIL: left the traced image, wanted 0x%06X\n", c.trap_pc);
+        printf("  recent dispatches:");
+        uint32_t first = c.recent_n > 16 ? c.recent_n - 16 : 0;
+        for (uint32_t k = first; k < c.recent_n; k++)
+            printf(" %06X", c.recent[k & 15]);
+        printf("\n");
         return 1;
     }
     if (c.cycles < budget) {

@@ -433,6 +433,7 @@ def emit(d, ops, reached, entries, out):
     w("\nvoid cy_run(cy_t *c, uint64_t budget)\n{\n")
     w("    while (!c->trapped) {\n")
     w("        if (c->cycles++ >= budget)\n            return;\n")
+    w("        c->recent[c->recent_n++ & 15] = c->pc;\n")
     w("        switch (cy_chunk_of(c->pc)) {\n")
     for k in range(len(chunks)):
         w("        case %d: cy_chunk%d(c, budget); break;\n" % (k, k))

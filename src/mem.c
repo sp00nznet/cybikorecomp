@@ -6,9 +6,11 @@
  * until something needs to react to being written, so the map can stay a
  * single array and grow hooks where they turn out to be needed.
  *
- * ponytail: flat 16 MB, no region dispatch. The I/O block at 0xFFFE00 is where
- * behaviour will first be required (timers, the LCD controller, the flash
- * chip select); split it out then, not before.
+ * ponytail: flat 16 MB, no region dispatch, and exactly one register with
+ * behaviour -- the serial status the boot ROM refuses to proceed without. The
+ * rest of the I/O block at 0xFFFE00 (timers, the LCD controller, the flash
+ * chip select) gets modelled when something is measured waiting on it, not
+ * before.
  */
 #include <stdlib.h>
 #include <string.h>
@@ -38,7 +40,14 @@ int cy_load(cy_t *c, uint32_t addr, const void *data, uint32_t len)
 
 uint8_t cy_read8(cy_t *c, uint32_t a)
 {
-    return c->mem[a & CY_ADDR_MASK];
+    a &= CY_ADDR_MASK;
+    if (a == CY_SSR2) {
+        /* Always ready to send, never anything received. Without this the
+         * boot ROM spins here forever -- it was 497,183 of the first 500,000
+         * memory reads. */
+        return CY_SSR_TDRE | CY_SSR_TEND;
+    }
+    return c->mem[a];
 }
 
 uint16_t cy_read16(cy_t *c, uint32_t a)
@@ -58,7 +67,10 @@ uint32_t cy_read32(cy_t *c, uint32_t a)
 
 void cy_write8(cy_t *c, uint32_t a, uint8_t v)
 {
-    c->mem[a & CY_ADDR_MASK] = v;
+    a &= CY_ADDR_MASK;
+    if (a == CY_TDR2 && c->serial_len < sizeof(c->serial) - 1)
+        c->serial[c->serial_len++] = (char)v;
+    c->mem[a] = v;
 }
 
 void cy_write16(cy_t *c, uint32_t a, uint16_t v)

@@ -150,6 +150,37 @@ def body(i):
     if base == "nop":
         return []
 
+    # Multiply and divide. The destination is both operand and result, and the
+    # two halves of a division land in the two halves of it -- quotient low,
+    # remainder high -- which is why the destination is one size wider than
+    # the source.
+    if base in ("mulxu", "mulxs", "divxu", "divxs") and i.sd:
+        dst, src = i.sd
+        wide = size == "w"
+        half = "0xFFFF" if wide else "0xFF"
+        signed = base.endswith("s")
+        sx = ("SEXT_W" if wide else "SEXT_B") if signed else ""
+        sval = ("%s(%s)" % (sx, rd(src))) if signed else rd(src)
+        if base.startswith("mul"):
+            dval = ("%s(%s)" % (sx, "(%s & %s)" % (rd(dst), half))
+                    if signed else "(%s & %s)" % (rd(dst), half))
+            return ["t = (uint32_t)((int32_t)%s * (int32_t)%s);" % (dval, sval),
+                    wr(dst, "t")]
+        # Division by zero leaves the destination alone on this part rather
+        # than trapping, so guard instead of dividing.
+        bits = 16 if wide else 8
+        return ["if ((%s) != 0) {" % sval,
+                "  int32_t q = (int32_t)%s / (int32_t)%s;" % (rd(dst), sval),
+                "  int32_t r = (int32_t)%s %% (int32_t)%s;" % (rd(dst), sval),
+                "  " + wr(dst, "((uint32_t)r << %d) | ((uint32_t)q & %s)"
+                          % (bits, half)),
+                "}"]
+
+    if base == "tas" and i.sd:
+        dst, _ = i.sd
+        return ["t = %s;" % rd(dst), "SETNZ(t, b);",
+                wr(dst, "t | 0x80U")]
+
     # EEPMOV is the H8's block move: copy from @ER5 to @ER6 until the counter
     # in R4 runs out, leaving it at zero. It is what the boot ROM's memcpy is
     # built out of, so nothing gets far without it.

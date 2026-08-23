@@ -148,12 +148,22 @@ def _decode_01(d, a, n):
         return Insn(a, 4, "ldc/stc", (), raw=d[a:a + 4])
     if b1 == 0x80:
         return Insn(a, 2, "sleep", raw=d[a:a + 2])
-    if b1 == 0xC0 and n >= 4:
-        return Insn(a, 4, "mulxs", (), raw=d[a:a + 4])
-    if b1 == 0xD0 and n >= 4:
-        return Insn(a, 4, "divxs", (), raw=d[a:a + 4])
+    if b1 in (0xC0, 0xD0) and n >= 4:
+        # 01 C0 / 01 D0 prefix the signed forms, whose body is the unsigned
+        # opcode: 50/52 for multiply, 51/53 for divide.
+        b2, b3 = d[a + 2], d[a + 3]
+        wide = b2 in (0x52, 0x53)
+        m = ("mulxs" if b1 == 0xC0 else "divxs") + (".w" if wide else ".b")
+        src = R("w", b3 >> 4) if wide else R("b", b3 >> 4)
+        dst = R("l", b3 & 7) if wide else R("w", b3 & 0xF)
+        names = (r16(b3 >> 4) if wide else r8(b3 >> 4),
+                 r32(b3 & 7) if wide else r16(b3 & 0xF))
+        return Insn(a, 4, m, names, raw=d[a:a + 4], sd=(dst, src))
     if b1 == 0xF0 and n >= 4:
-        return Insn(a, 4, "tas", (), raw=d[a:a + 4])
+        # TAS @ERd: flag the byte, then set its top bit.
+        return Insn(a, 4, "tas", ("@%s" % r32((d[a + 3] >> 4) & 7),),
+                    raw=d[a:a + 4],
+                    sd=(("ind", "b", (d[a + 3] >> 4) & 7), None))
     return None
 
 
@@ -516,8 +526,16 @@ def decode(d, a):
 
     # --- 0x5x : the control-transfer block ---
     if b0 in (0x50, 0x51, 0x52, 0x53):
+        # Operand widths differ between the byte and word forms: the byte ones
+        # take an 8-bit source into a 16-bit destination, the word ones a
+        # 16-bit source into a 32-bit one. Same shape, different registers.
         m = ("mulxu.b", "divxu.b", "mulxu.w", "divxu.w")[b0 - 0x50]
-        return Insn(a, 2, m, (), raw=d[a:a + 2])
+        wide = b0 in (0x52, 0x53)
+        src = R("w", b1 >> 4) if wide else R("b", b1 >> 4)
+        dst = R("l", b1 & 7) if wide else R("w", b1 & 0xF)
+        names = (r16(b1 >> 4) if wide else r8(b1 >> 4),
+                 r32(b1 & 7) if wide else r16(b1 & 0xF))
+        return Insn(a, 2, m, names, raw=d[a:a + 2], sd=(dst, src))
     if b0 == 0x54:
         return Insn(a, 2, "rts", kind=K_RET, raw=d[a:a + 2])
     if b0 == 0x55:

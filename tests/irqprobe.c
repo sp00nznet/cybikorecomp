@@ -47,6 +47,49 @@ static uint32_t try_vector(int vec, uint32_t *before)
     return after;
 }
 
+/* Each vector points at a 26-byte trampoline in the boot ROM that loads its
+ * real handler from a slot in on-chip RAM. The slots run consecutively from
+ * 0xFFEC0C, one per vector in table order, and the ROM fills them during init
+ * -- so a vector is only live once its slot is. */
+#define SLOT_BASE 0xFFEC0Cu
+
+static uint32_t slot_of(int index) { return SLOT_BASE + 4u * (uint32_t)index; }
+
+static void dump_slots(void)
+{
+    cy_t c;
+    if (cy_init(&c) != 0)
+        exit(2);
+    cy_load(&c, 0, img, (uint32_t)img_len);
+    c.pc = cy_read32(&c, 0) & CY_ADDR_MASK;
+    c.e[7] = 0x23FF00;
+    cy_run(&c, 400000);
+
+    printf("handler slots once the ROM reaches its wait loop:\n");
+    int idx = 0, self_ref = 0;
+    for (int v = 0; v < 64; v++) {
+        uint32_t t = ((uint32_t)img[4 * v] << 24) | ((uint32_t)img[4 * v + 1] << 16)
+                   | ((uint32_t)img[4 * v + 2] << 8) | img[4 * v + 3];
+        if (!t || t == 0xFFFFFFFFu || v == 0)
+            continue;
+        uint32_t h = cy_read32(&c, slot_of(idx)) & CY_ADDR_MASK;
+        printf("  vec %2d  slot 0x%06X = 0x%06X%s\n", v, slot_of(idx), h,
+               h == 0x001286 ? "   <-- the tick ISR"
+               : (h == (t & CY_ADDR_MASK) ? "   (uninstalled: points at its own"
+                                            " trampoline)" : ""));
+        if (h == (t & CY_ADDR_MASK))
+            self_ref++;
+        idx++;
+    }
+    if (self_ref)
+        printf("\n%d of %d slots still hold their own trampoline. The boot ROM\n"
+               "does not install handlers -- CyOS does. Delivering an interrupt\n"
+               "here recurses through the trampoline until the stack runs out.\n",
+               self_ref, idx);
+    printf("\n");
+    cy_free(&c);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -59,6 +102,7 @@ int main(int argc, char **argv)
     img_len = fread(img, 1, CY_MEM_SIZE, f);
     fclose(f);
 
+    dump_slots();
     printf("vector  handler   tick 0x%06X\n", TICK);
     int found = 0;
     for (int v = 0; v < 64; v++) {

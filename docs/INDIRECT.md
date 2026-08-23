@@ -110,3 +110,47 @@ becomes a switch on the register.
 The vtable analysis is what makes that dispatch *small* rather than what makes
 it *correct* — 641 known targets instead of a switch over every address in the
 image. Worth having, not load-bearing.
+
+## Postscript: the slots really are uninstalled
+
+The static reading above -- that each slot points at its own trampoline because
+the boot ROM has not filled them in yet -- was confirmed by running it.
+`tests/irqprobe.c` dumps the table once the ROM reaches its wait loop:
+
+```
+vec  7  slot 0xFFEC0C = 0x0012BE     the trampoline for vector 7
+vec 16  slot 0xFFEC10 = 0x0012D8     the trampoline for vector 16
+...
+25 of 25 slots still hold their own trampoline
+```
+
+**The boot ROM never installs an interrupt handler.** CyOS does, later. So
+delivering a timer interrupt to make the boot loader's timeout expire does not
+work: the trampoline calls its own slot, recurses, and walks the stack pointer
+negative. That is not an emulation bug, it is the machine saying the interrupt
+should not have been delivered.
+
+Which raises the question the tick counter was hiding. `0x00246E`:
+
+```
+002468  stm.l (er4-er5), @-sp
+00246C  mov.l er0, er5          the timeout argument
+00246E  beq 0x00247A            zero means...
+002470  jsr @0x00129E           ...otherwise deadline = now + timeout
+00247A  mov.l #0xFFFFFFF0, er4  ...wait forever
+```
+
+A zero timeout is a deliberate infinite wait, and the call site the boot
+reaches passes zero. The boot loader is sitting in "wait for a host over
+serial" -- listening for CyberLoad -- which is a legitimate state and not
+something a timer was ever going to end.
+
+Getting past it means one of two things, and they are worth distinguishing
+before writing any more code:
+
+1. **Answer it.** Feed the serial handshake CyberLoad would send, so RDRF goes
+   true and the loop proceeds.
+2. **Take the other branch.** Something upstream chooses between waiting for a
+   host and booting from flash. Finding that condition is the more useful
+   result, because booting from flash is what a Cybiko does when nothing is
+   plugged into it.

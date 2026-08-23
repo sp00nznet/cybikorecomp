@@ -70,6 +70,26 @@ int main(int argc, char **argv)
            c.e[4], c.e[5], c.e[6], c.e[7]);
     printf("  N=%d Z=%d V=%d C=%d\n", c.nf, c.zf, c.vf, c.cf);
 
+    /* Walk the guest stack for return addresses. Nothing else says how the
+     * ROM got where it is: a JSR pushes the address after itself, so a value
+     * on the stack that points just past a call site names the caller. */
+    printf("\ncall chain from the stack:\n");
+    for (uint32_t k = 0, shown = 0; k < 64 && shown < 10; k++) {
+        uint32_t sp = c.e[7] + 4 * k;
+        uint32_t v = cy_read32(&c, sp) & CY_ADDR_MASK;
+        if (v < 4 || v >= 0x8000 || (v & 1))
+            continue;                     /* not a boot-ROM return address */
+        uint8_t p0 = cy_read8(&c, v - 4), p2 = cy_read8(&c, v - 2);
+        const char *how = (p0 == 0x5E) ? "jsr @aa:24"
+                        : (p0 == 0x5C) ? "bsr d:16"
+                        : (p2 == 0x5D) ? "jsr @ERn"
+                        : (p2 == 0x55) ? "bsr d:8" : NULL;
+        if (!how)
+            continue;
+        printf("  0x%06X  return into, called by %s\n", v, how);
+        shown++;
+    }
+
     if (c.serial_len) {
         printf("\nserial output (%u bytes):\n---\n%.*s\n---\n",
                c.serial_len, (int)c.serial_len, c.serial);

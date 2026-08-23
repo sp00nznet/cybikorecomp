@@ -150,6 +150,27 @@ def body(i):
     if base == "nop":
         return []
 
+    # Bit transfers through the carry flag. BLD and friends are how this ROM
+    # tests a bit it is about to branch on, and the software multiply at
+    # 0x005C6E is built out of `bld` + `bcc` + shift.
+    if base in ("bld", "bild", "bst", "bist", "band", "biand",
+                "bor", "bior", "bxor", "bixor") and i.sd:
+        dst, src = i.sd
+        n = rd(src)
+        bit = "((%s >> %s) & 1)" % (rd(dst), n)
+        if base == "bld":
+            return ["c->cf = %s;" % bit]
+        if base == "bild":
+            return ["c->cf = !%s;" % bit]
+        if base in ("bst", "bist"):
+            v = "c->cf" if base == "bst" else "!c->cf"
+            return ["t = (%s & ~(1u << %s)) | ((uint32_t)(%s) << %s);"
+                    % (rd(dst), n, v, n), wr(dst, "t")]
+        op = {"band": "&", "biand": "&", "bor": "|", "bior": "|",
+              "bxor": "^", "bixor": "^"}[base]
+        rhs = bit if not base.startswith("bi") else "(!%s)" % bit
+        return ["c->cf = (c->cf %s %s) & 1;" % (op, rhs)]
+
     # Multiply and divide. The destination is both operand and result, and the
     # two halves of a division land in the two halves of it -- quotient low,
     # remainder high -- which is why the destination is one size wider than

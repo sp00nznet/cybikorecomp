@@ -386,8 +386,12 @@ def _decode_6(d, a, n):
         return Insn(a, 2, m + ".w", (r16(b1 >> 4), r16(b1 & 0xF)),
                     raw=d[a:a + 2],
                     sd=(R("w", b1 & 0xF), R("w", b1 >> 4)))
-    if lo == 0x7:
-        return Insn(a, 2, "bst/bist", (), raw=d[a:a + 2])
+    if lo == 0x7:                         # BST / BIST #xx:3, Rd
+        inv = (b1 & 0x80) != 0
+        bit = (b1 >> 4) & 7
+        return Insn(a, 2, "bist" if inv else "bst",
+                    ("#%d" % bit, r8(b1 & 0xF)), raw=d[a:a + 2],
+                    sd=(R("b", b1 & 0xF), I("b", bit)))
     if lo >= 0x8:
         return _mov_ea(d, a, lo, "b" if (lo & 1) == 0 else "w", 0)
     return None
@@ -587,8 +591,15 @@ def decode(d, a):
         return Insn(a, 2, m, ("#%d" % bit, r8(b1 & 0xF)), raw=d[a:a + 2],
                     sd=(R("b", b1 & 0xF), I("b", bit)))
     if b0 in (0x74, 0x75, 0x76, 0x77):
-        return Insn(a, 2, ("bor", "bxor", "band", "bld")[b0 - 0x74],
-                    (), raw=d[a:a + 2])
+        # Bit transfers through the carry flag. The top bit of the second byte
+        # selects the inverted variant (BIOR, BIXOR, BIAND, BILD), the next
+        # three are the bit number, and the low nibble the register.
+        base = ("bor", "bxor", "band", "bld")[b0 - 0x74]
+        inv = (b1 & 0x80) != 0
+        name = (base[0] + "i" + base[1:]) if inv else base
+        bit = (b1 >> 4) & 7
+        return Insn(a, 2, name, ("#%d" % bit, r8(b1 & 0xF)), raw=d[a:a + 2],
+                    sd=(R("b", b1 & 0xF), I("b", bit)))
     if b0 == 0x78 and n >= 8:
         return Insn(a, 8, "mov", ("@(d:24,ERs)",), raw=d[a:a + 8])
     if b0 == 0x79:

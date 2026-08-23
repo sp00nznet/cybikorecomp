@@ -49,8 +49,11 @@ static uint32_t try_vector(int vec, uint32_t *before)
 
 /* Each vector points at a 26-byte trampoline in the boot ROM that loads its
  * real handler from a slot in on-chip RAM. The slots run consecutively from
- * 0xFFEC0C, one per vector in table order, and the ROM fills them during init
- * -- so a vector is only live once its slot is. */
+ * 0xFFEC0C, one per vector in table order.
+ *
+ * Scan all 256. An earlier version stopped at 64 and concluded the ROM never
+ * installs a handler at all, because the one it does install -- the tick ISR
+ * at 0x001282, into slot 0xFFEC78 -- belongs to vector 66. */
 #define SLOT_BASE 0xFFEC0Cu
 
 static uint32_t slot_of(int index) { return SLOT_BASE + 4u * (uint32_t)index; }
@@ -67,7 +70,7 @@ static void dump_slots(void)
 
     printf("handler slots once the ROM reaches its wait loop:\n");
     int idx = 0, self_ref = 0;
-    for (int v = 0; v < 64; v++) {
+    for (int v = 0; v < 256; v++) {
         uint32_t t = ((uint32_t)img[4 * v] << 24) | ((uint32_t)img[4 * v + 1] << 16)
                    | ((uint32_t)img[4 * v + 2] << 8) | img[4 * v + 3];
         if (!t || t == 0xFFFFFFFFu || v == 0)
@@ -105,7 +108,7 @@ int main(int argc, char **argv)
     dump_slots();
     printf("vector  handler   tick 0x%06X\n", TICK);
     int found = 0;
-    for (int v = 0; v < 64; v++) {
+    for (int v = 0; v < 256; v++) {
         uint32_t h = ((uint32_t)img[4 * v] << 24) | ((uint32_t)img[4 * v + 1] << 16)
                    | ((uint32_t)img[4 * v + 2] << 8) | img[4 * v + 3];
         if (!h || h == 0xFFFFFFFFu || v == 0)

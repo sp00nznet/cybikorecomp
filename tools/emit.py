@@ -215,6 +215,19 @@ def body(i):
 
     # The condition-code register as a value. ORC sets bits, ANDC clears the
     # ones not named, XORC toggles, LDC replaces outright.
+    # SLEEP waits for an interrupt. Nothing here delivers one mid-chunk, and
+    # the code that runs it is a idle loop that gets interrupted anyway, so
+    # falling through costs a little power and nothing else.
+    if base == "sleep":
+        return []
+
+    # STC/LDC move the flags in and out of a register -- how a critical
+    # section saves the interrupt mask before masking it.
+    if base == "stc" and i.sd and i.sd[1][0] == "ccr":
+        return [wr(i.sd[0], "CY_CCR_GET(c)")]
+    if base == "ldc" and i.sd and i.sd[0][0] == "ccr" and i.sd[1][0] == "r":
+        return ["CY_CCR_SET(c, %s);" % rd(i.sd[1])]
+
     if base in ("orc", "andc", "xorc", "ldc") and i.sd:
         dst, src = i.sd
         if dst[0] == "ccr" and src[0] == "i":
@@ -411,11 +424,17 @@ def emit_chunk(k, ch, ops, where, w):
         the first run that got as far as the boot ROM's polling loops did.
         Every loop has a backward edge, so checking there is sufficient, and
         forward branches stay free.
+
+        The same edge is where an interrupt gets its chance. A spin loop that
+        waits for the tick counter to advance never re-dispatches, so polling
+        only in cy_run would leave it spinning against a clock only the
+        interrupt moves.
         """
         if target not in mine:
             return "c->pc = 0x%06XU; return;" % target
         if frm is not None and target <= frm:
-            return ("if (c->cycles++ >= budget) { c->pc = 0x%06XU; return; } "
+            return ("if (c->cycles++ >= budget || CY_IRQ_DUE(c)) "
+                    "{ c->pc = 0x%06XU; return; } "
                     "goto L_%06X;" % (target, target))
         return "goto L_%06X;" % target
 
@@ -516,6 +535,7 @@ def emit(d, ops, reached, entries, out):
     w("\nvoid cy_run(cy_t *c, uint64_t budget)\n{\n")
     w("    while (!c->trapped) {\n")
     w("        if (c->cycles++ >= budget)\n            return;\n")
+    w("        cy_irq_poll(c);\n");
     w("        c->recent[c->recent_n++ & 15] = c->pc;\n")
     w("        switch (cy_chunk_of(c->pc)) {\n")
     for k in range(len(chunks)):

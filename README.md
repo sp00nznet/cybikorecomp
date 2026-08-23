@@ -23,20 +23,35 @@ first job is measuring it honestly rather than assuming.
 
 ## Status
 
-CyOS is extracted, traced and translated to C. It does not run yet — there are
-no peripherals behind the memory map.
+**CyOS boots.** It initialises its dispatcher, name list, flash and memory
+manager, reads its own filesystem over SPI, runs on a 10 ms tick and draws to
+the LCD. It is waiting on the keyboard now.
 
 | Stage | State |
 |---|---|
 | **`.app` container format** — parse, list, extract | ✅ 410/410 apps parse |
-| **H8S/2000 decoder** — lengths, control flow, operands | ✅ 0 undecodable; 97.8% with structured operands |
-| **Control-flow analysis** | ✅ 39,841 instructions, 1,863 entry points |
+| **H8S/2000 decoder** — lengths, control flow, operands | ✅ 0 undecodable |
+| **Control-flow analysis** | ✅ 39,975 instructions, 1,980 entry points |
 | **CyOS extraction** — unpacked, out of MAME | ✅ see [docs/CYOS.md](docs/CYOS.md) |
 | **Indirect calls** — 227 sites | ✅ three mechanisms, see [docs/INDIRECT.md](docs/INDIRECT.md) |
-| **C emitter** | ✅ 99.2% of traced instructions |
-| **Runtime** — CPU state, memory, flags | ✅ enough to compile |
-| **Peripherals** — LCD, keyboard, timers, flash, radio | ⬜ not started |
+| **C emitter** | ✅ 100.0% of traced instructions |
+| **Runtime** — CPU state, memory, flags, interrupts | ✅ |
+| **Peripherals** — flash, timers, LCD | ✅ see [docs/PERIPHERALS.md](docs/PERIPHERALS.md) |
+| **Peripherals** — keyboard, sound, radio | ⬜ not started |
 | **`0x02` compression** | 🔨 unidentified, and no longer blocking |
+
+```
+$ smoke cybiko.img 20000000 cyos
+CyOS header ok, entry 0x21965C
+serial output (110 bytes):
+---
+Initializing dispatcher...
+Initializing names list...
+Initializing flash device...
+Initializing memmgr...
+---
+ok: ran the whole budget inside the image
+```
 
 ```
 $ python tests/test_decode.py cyrom112.bin apps/
@@ -67,6 +82,14 @@ Two other things that looked like walls were not:
 - **65% of the boot ROM was unreachable.** It was calls into CyOS and vice
   versa; analysing the two as one address space took unresolved transfers from
   2,533 to 227. [docs/INDIRECT.md](docs/INDIRECT.md).
+
+And one that is a wall, handled rather than solved. A C++ method nothing calls
+directly is reachable only through its own vtable — and the vtable detector
+will not believe a run containing an address no trace has reached, because
+loosening that test to "looks like code" took the trace from 39,959
+instructions to 203,519, more code than the image holds. So those are not
+guessed at: the dispatch reports the address it was refused, that address goes
+in the seeds file, and the image is emitted again. Two rounds settled it.
 
 ## What the boot ROM looks like
 
@@ -162,10 +185,17 @@ cybikorecomp/
 │   ├── mame_dump.lua    dump CyOS out of a running MAME
 │   └── mame_probe.lua   hunt a routine by how it writes memory
 ├── tests/
-│   └── test_decode.py   encoding checks, plus whole-ROM and whole-library ones
-├── include/cybikorecomp/h8s.h    CPU state, memory, flag macros
-├── src/mem.c                    memory and condition codes
-└── docs/  CYOS.md  INDIRECT.md  FORMATS.md
+│   ├── test_decode.py   encoding checks, plus whole-ROM and whole-library ones
+│   ├── smoke.c          does the recompiled image execute?
+│   ├── ioprobe.c        which I/O registers does it actually touch?
+│   └── lcdprobe.c       print the panel as characters
+├── include/cybikorecomp/  h8s.h  lcd.h
+├── src/
+│   ├── mem.c            memory and condition codes
+│   ├── io.c             the peripherals, and interrupt delivery
+│   ├── flash.c          the AT45DB041 behind SCI1
+│   └── lcd.c            the HD66421
+└── docs/  CYOS.md  INDIRECT.md  FORMATS.md  PERIPHERALS.md
 ```
 
 ## Usage
@@ -174,7 +204,7 @@ cybikorecomp/
 python tools/cyimage.py  cyrom112.bin cyram.bin -o cybiko.img
 python tools/analyze.py  cyrom112.bin          # what the boot ROM's flow looks like
 python tools/vtables.py  cybiko.img cyio.bin   # the indirect-call target tables
-python tools/emit.py     cybiko.img cyos.c --io cyio.bin
+python tools/emit.py     cybiko.img cyos.c --io cyio.bin --pc seeds.txt
 python tools/cyapp.py    Calculator.app        # list a container
 python tools/cyapp.py    Calculator.app -x out # extract its stored members
 python tests/test_decode.py cyrom112.bin apps/ # self-checks
@@ -182,6 +212,22 @@ python tests/test_decode.py cyrom112.bin apps/ # self-checks
 
 The encoding checks run with no arguments; the ROM and app checks are skipped
 if you do not pass paths.
+
+To build and run what the emitter produced:
+
+```sh
+cc -std=c11 -O1 -Iinclude -c cyos.c src/mem.c src/io.c src/flash.c src/lcd.c
+cc -std=c11 -O1 -Iinclude -c tests/smoke.c tests/lcdprobe.c
+cc cyos.o mem.o io.o flash.o smoke.o -o smoke
+cc cyos.o mem.o io.o flash.o lcd.o lcdprobe.o -o lcdprobe
+
+CYFLASH=flash_v1246.bin ./smoke    cybiko.img 20000000 cyos
+CYFLASH=flash_v1246.bin ./lcdprobe cybiko.img 20000000 cyos
+```
+
+`smoke` prints what CyOS said on the debug serial and whether control ever
+left the image; `lcdprobe` prints the panel. When `smoke` reports an address
+it was refused, add it to the seeds file and emit again.
 
 ## Where the images come from
 

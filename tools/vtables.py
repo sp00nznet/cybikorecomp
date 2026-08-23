@@ -42,6 +42,19 @@ def find(d, code):
     to hold a code pointer. Without this the detector inflates as the known
     code set grows -- seeding with recorded PCs took it from 99 tables holding
     650 pointers to 372 holding 15,108, for only 21 more distinct targets.
+
+    Every entry must be *already traced*, not merely shaped like an address.
+    Relaxing that to "decodes as an instruction" looked reasonable and was
+    not: live CyOS RAM is dense with heap pointers that all pass the shape
+    test, and the trace went from 39,959 instructions to 203,519 -- more code
+    than the image holds. Taking only the entries immediately outside a
+    confirmed table was no better: 143 of them, and the next round of
+    analysis never terminated.
+
+    So gaps are not guessed at all. A method reachable only through its own
+    vtable is found by *running* the image -- the dispatch reports the
+    address it was asked for, and that address goes in the seeds file. See
+    pc_seeds, and `--pc` on emit.py.
     """
     out = []
     a = RAM_LO
@@ -81,6 +94,9 @@ def resolve(d, io=None, rounds=8, pcfile=None):
         seeds |= irq_handlers(io)
     if pcfile:
         seeds |= analyze.pc_seeds(pcfile)
+    entry = analyze.cyos_entry(d)
+    if entry:
+        seeds.add(entry)
 
     prev, runs, result = -1, [], None
     for _ in range(rounds):

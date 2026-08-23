@@ -46,6 +46,24 @@ def vectors(d):
     return out
 
 
+# The loaded CyOS image announces itself at the bottom of SRAM: a magic
+# longword, then its entry point. Nothing in the image jumps there -- the boot
+# loader does, using this header -- so without reading it the entry is invisible
+# to a static trace and the whole OS looks unreachable.
+CY_RAM_BASE = 0x200000
+CY_OS_MAGIC = 0x1234ABCD
+
+
+def cyos_entry(d):
+    """The CyOS entry point from its header, or None if there is no header."""
+    if len(d) < CY_RAM_BASE + 8:
+        return None
+    if u32(d, CY_RAM_BASE) != CY_OS_MAGIC:
+        return None
+    entry = u32(d, CY_RAM_BASE + 4) & 0xFFFFFF
+    return entry if entry < len(d) else None
+
+
 def pc_seeds(path):
     """Addresses actually executed, captured from a run under MAME.
 
@@ -88,13 +106,27 @@ def prologue_seeds(d, base=0, lo=0, hi=None):
     through direct calls, gets most of an image without any value analysis.
     Leaf functions that save nothing are missed, and are picked up later only
     if something calls them directly.
+
+    A function with locals reserves the frame *before* saving:
+
+        1B 9n              subs #n, er7          (2 bytes, small frames)
+        7A 37 dddddddd     sub.l #d:32, er7      (6 bytes, larger ones)
+
+    so the real entry is earlier than the stm.l. Seeding only the stm.l
+    leaves those functions callable but not addressable -- the dispatch knows
+    0x218B62 and refuses the 0x218B60 that a caller actually asks for.
     """
     hi = hi if hi is not None else len(d)
     out = set()
     for a in range(lo, min(hi, len(d) - 4), 2):
-        if (d[a] == 0x01 and d[a + 2] == 0x6D
+        if not (d[a] == 0x01 and d[a + 2] == 0x6D
                 and (d[a + 1] & 0x8F) == 0 and (d[a + 3] & 0x80)):
-            out.add(base + a)
+            continue
+        out.add(base + a)
+        if a - 2 >= lo and d[a - 2] == 0x1B and (d[a - 1] & 0xF0) == 0x90:
+            out.add(base + a - 2)
+        elif a - 6 >= lo and d[a - 6] == 0x7A and d[a - 5] == 0x37:
+            out.add(base + a - 6)
     return out
 
 

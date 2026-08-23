@@ -15,9 +15,17 @@
 
 #include <stdint.h>
 
+#include "cybikorecomp/lcd.h"
+
 /* Advanced mode: 24-bit addresses. 16 MB of flat memory is less than the
  * machine this runs on has in a browser tab, and it makes every access a
  * bounds-masked array index rather than a region search. */
+/* Where the 512K SRAM lives, and the header the loaded CyOS image carries at
+ * the bottom of it: the magic, then its entry point. */
+#define CY_RAM_BASE  0x200000u
+#define CY_RAM_SIZE  0x080000u
+#define CY_OS_MAGIC  0x1234ABCDu
+
 #define CY_ADDR_BITS 24
 #define CY_ADDR_MASK 0x00FFFFFFu
 #define CY_MEM_SIZE  (1u << CY_ADDR_BITS)
@@ -47,7 +55,42 @@ typedef struct cy {
      * what the firmware thinks it is doing. */
     char     serial[4096];
     uint32_t serial_len;
+
+    /* The SPI flash, and where the chip is in the command being clocked into
+     * it. An SPI transfer sends and receives at once, so spi_in holds the byte
+     * that came back from the last write to TDR1. */
+    uint8_t *flash;
+    uint8_t  spi_in, spi_pending;
+    uint8_t  spi_state, spi_cmd, spi_argn, spi_dummy;
+    uint8_t  spi_arg[3];
+    uint32_t spi_addr;
+
+    /* The two 8-bit timer channels. The counter is derived from `cycles`
+     * rather than stepped, so only the preload and its anchor are kept. */
+    uint8_t  tmr_pre[2], tmr_csr[2];
+    uint64_t tmr_at[2];
+    uint64_t irq_at;          /* cycle of the next tick interrupt */
+
+    /* What CyOS clocks out of SCI0, kept so the protocol can be read back.
+     * Diagnostic only -- nothing in the runtime consumes it. */
+    uint8_t  sci0[512];
+    uint32_t sci0_len;
+
+    cy_lcd_t lcd;
 } cy_t;
+
+void cy_io_reset(cy_t *c);
+void cy_irq_poll(cy_t *c);
+
+/* Cheap enough to sit on every loop back-edge: one compare against a
+ * precomputed deadline. cy_irq_poll does the rest, from the run loop. */
+#define CY_IRQ_DUE(c) ((c)->cycles >= (c)->irq_at && !(c)->iff)
+
+/* The AT45DB041 behind SCI1. Pages are 264 bytes, not 256. */
+int     cy_flash_load(cy_t *c, const void *data, uint32_t len);
+uint8_t cy_flash_xfer(cy_t *c, uint8_t out);
+void    cy_flash_deselect(cy_t *c);
+uint32_t cy_flash_load_env(cy_t *c);
 
 /* --- H8S/2246 on-chip peripherals ---------------------------------------
  *
@@ -69,6 +112,22 @@ typedef struct cy {
 #define CY_SSR_TDRE  0x80u
 #define CY_SSR_RDRF  0x40u
 #define CY_SSR_TEND  0x04u
+
+/* SCI1, wired as the SPI port to the AT45DB flash. CyOS puts it in
+ * synchronous mode, asserts chip select through bit 4 of 0xFFFF62, waits for
+ * bit 2 of 0xFFFF5E, then clocks command bytes out of TDR1. */
+#define CY_TDR0      0xFFFF7Bu    /* SCI0, believed to be the LCD */
+#define CY_SSR0      0xFFFF7Cu
+#define CY_SMR1      0xFFFF80u
+#define CY_BRR1      0xFFFF81u
+#define CY_SCR1      0xFFFF82u
+#define CY_TDR1      0xFFFF83u
+#define CY_SSR1      0xFFFF84u
+#define CY_RDR1      0xFFFF85u
+#define CY_SPI_RDY   0xFFFF5Eu    /* bit 2: the port is ready to be driven */
+#define CY_SPI_CS    0xFFFF62u    /* bit 4: chip select */
+#define CY_SPI_RDY_BIT 0x04u
+#define CY_SPI_CS_BIT  0x10u
 
 int  cy_init(cy_t *c);
 void cy_free(cy_t *c);

@@ -140,6 +140,9 @@ def _decode_01(d, a, n):
                                     sd=(r.sd[0], r.sd[1]))
                 return r
         if b2 == 0x78 and n >= 10:
+            r = _decode_78(d, a, 2, "l")
+            if r:
+                return r
             return Insn(a, 10, "mov.l", ("@(d:24,ERs)",), raw=d[a:a + 10])
         return Insn(a, 4, "mov.l", (), raw=d[a:a + 4])
     if b1 == 0x40 and n >= 4:
@@ -397,13 +400,85 @@ def _decode_6(d, a, n):
     return None
 
 
+# --- 0x78: MOV through a 32-bit displacement ------------------------------
+
+def _decode_78(d, a, off, force):
+    """`78 r0 6A/6B x_r dddddddd` -- @(d:32, ERr).
+
+    Eight bytes on its own for byte and word, ten behind the `01 00` prefix
+    for longword. The middle nibble of the third byte picks direction: 2 is a
+    load out of memory, A a store into it.
+    """
+    b1, b2, b3 = d[a + off + 1], d[a + off + 2], d[a + off + 3]
+    if (b1 & 0x8F) or b2 not in (0x6A, 0x6B):
+        return None
+    dirn = (b3 >> 4) & 0xF
+    if dirn not in (0x2, 0xA):
+        return None
+    size = force if force == "l" else ("w" if b2 == 0x6B else "b")
+    if force == "l" and b2 != 0x6B:
+        return None
+    length = off + 8
+    disp = u32(d, a + off + 4)
+    if disp & 0x80000000:
+        disp -= 0x100000000
+    mem = ("dsp", size, (b1 >> 4) & 7, disp)
+    reg = R(size, b3 & (0x7 if size == "l" else 0xF))
+    store = dirn == 0xA
+    dst, src = (mem, reg) if store else (reg, mem)
+    txt = ("@(0x%X,er%d)" % (disp & 0xFFFFFFFF, (b1 >> 4) & 7))
+    name = {"b": r8, "w": r16, "l": r32}[size](b3 & (0x7 if size == "l" else 0xF))
+    ops = (name, txt) if store else (txt, name)
+    return Insn(a, length, "mov." + size, ops, raw=d[a:a + length],
+                sd=(dst, src))
+
+
 # --- 0x7Cx-0x7Fx bit-operation-on-memory group ----------------------------
 
+# The second word names the operation. 6x takes the bit number from a
+# register, 7x from a 3-bit immediate.
+_BITOP = {0x60: "bset", 0x61: "bnot", 0x62: "bclr", 0x63: "btst",
+          0x70: "bset", 0x71: "bnot", 0x72: "bclr", 0x73: "btst",
+          0x74: "bor", 0x75: "bxor", 0x76: "band", 0x77: "bld",
+          0x67: "bst"}
+
+
 def _decode_7c(d, a, n):
-    """7C/7D/7E/7F: a bit op whose operand is @ERd or @aa, always 4 bytes."""
+    """7C/7D/7E/7F: a bit op whose operand is @ERd or @aa:8, always 4 bytes.
+
+    The operand is in the first word and the operation in the second, which
+    is the reverse of everywhere else:
+
+        7C r0 <op> <bit>0     @ERr, read-only ops (BTST, BOR, BAND, BLD)
+        7D r0 <op> <bit>0     @ERr, read-modify-write (BSET, BNOT, BCLR, BST)
+        7E aa <op> <bit>0     @0xFFFFaa, read-only
+        7F aa <op> <bit>0     @0xFFFFaa, read-modify-write
+
+    Anything whose second word is not one of the known ops is not a bit op at
+    all -- it is a misdecode landing in data -- so say so rather than invent
+    an operation for it.
+    """
     if n < 4:
         return None
-    return Insn(a, 4, "bit-op", (), raw=d[a:a + 4])
+    b0, b1, b2, b3 = d[a], d[a + 1], d[a + 2], d[a + 3]
+    name = _BITOP.get(b2)
+    if name is None or (b3 & 0x0F) != 0:
+        return Insn(a, 4, "bit-op", (), raw=d[a:a + 4])
+    if b2 == 0x67 and (b3 & 0x80):
+        name = "bist"
+    if b0 in (0x7C, 0x7D):
+        dst = ("ind", "b", (b1 >> 4) & 7)
+        where = "@er%d" % ((b1 >> 4) & 7)
+    else:
+        dst = ("abs", "b", 0xFFFF00 | b1)
+        where = "@0x%06X" % (0xFFFF00 | b1)
+    if b2 < 0x70:                       # bit number in a register
+        src = R("b", (b3 >> 4) & 0xF)
+        what = r8((b3 >> 4) & 0xF)
+    else:
+        src = I("b", (b3 >> 4) & 7)
+        what = "#%d" % ((b3 >> 4) & 7)
+    return Insn(a, 4, name, (what, where), raw=d[a:a + 4], sd=(dst, src))
 
 
 def decode(d, a):
@@ -425,6 +500,16 @@ def decode(d, a):
         r = _decode_01(d, a, n)
         if r:
             return r
+    if b0 in (0x02, 0x03) and (b1 & 0xF0) == 0x00:
+        # 02 0r  stc ccr, Rd    03 0r  ldc Rs, ccr
+        # (the 1r forms are EXR, which this part has but nothing here uses)
+        ccr = ("ccr", "b", 0)
+        reg = R("b", b1 & 0xF)
+        if b0 == 0x02:
+            return Insn(a, 2, "stc", ("ccr", r8(b1 & 0xF)), raw=d[a:a + 2],
+                        sd=(reg, ccr))
+        return Insn(a, 2, "ldc", (r8(b1 & 0xF), "ccr"), raw=d[a:a + 2],
+                    sd=(ccr, reg))
     if b0 in (0x02, 0x03):
         return Insn(a, 2, "stc" if b0 == 0x02 else "ldc", (), raw=d[a:a + 2])
     if b0 in (0x04, 0x05, 0x06, 0x07):
@@ -601,6 +686,9 @@ def decode(d, a):
         return Insn(a, 2, name, ("#%d" % bit, r8(b1 & 0xF)), raw=d[a:a + 2],
                     sd=(R("b", b1 & 0xF), I("b", bit)))
     if b0 == 0x78 and n >= 8:
+        r = _decode_78(d, a, 0, "b")
+        if r:
+            return r
         return Insn(a, 8, "mov", ("@(d:24,ERs)",), raw=d[a:a + 8])
     if b0 == 0x79:
         r = _decode_79(d, a, n)

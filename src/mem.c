@@ -20,6 +20,7 @@
 int cy_init(cy_t *c)
 {
     memset(c, 0, sizeof(*c));
+    cy_io_reset(c);
     c->mem = (uint8_t *)calloc(CY_MEM_SIZE, 1);
     return c->mem ? 0 : -1;
 }

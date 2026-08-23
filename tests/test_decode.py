@@ -87,7 +87,7 @@ def test_branches():
     print("branches ok  (relative targets, and indirects report no target)")
 
 
-def test_rom(path):
+def check_rom(path):
     data = load(path)
     ops, reached, entries, calls, unresolved = analyze.analyze(data)
 
@@ -107,7 +107,7 @@ def test_rom(path):
           "0 undecodable)" % (len(reached), len(entries), stm))
 
 
-def test_apps(dirname):
+def check_apps(dirname):
     files = sorted(glob.glob(os.path.join(dirname, "*.app")))
     assert files, "no .app files in " + dirname
     packed = stored = 0
@@ -134,12 +134,12 @@ if __name__ == "__main__":
     test_branches()
     rom = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CYROM")
     if rom and os.path.exists(rom):
-        test_rom(rom)
+        check_rom(rom)
     else:
         print("rom      skipped (pass a path to cyrom112.bin)")
     apps = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("CYAPPS")
     if apps and os.path.isdir(apps):
-        test_apps(apps)
+        check_apps(apps)
     else:
         print("apps     skipped (pass a directory of .app files)")
     print("all checks passed")

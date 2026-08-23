@@ -13,6 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <string.h>
+
 #include "cybikorecomp/h8s.h"
 
 /* On-chip RAM starts at 0xFFEC00 and the I/O block at 0xFFFE00, but the
@@ -42,6 +44,7 @@ static void note_write(uint32_t a, uint32_t v)
 int cy_init(cy_t *c)
 {
     memset(c, 0, sizeof(*c));
+    cy_io_reset(c);
     c->mem = (uint8_t *)calloc(CY_MEM_SIZE, 1);
     rd_count = (uint32_t *)calloc(IO_N, sizeof(uint32_t));
     wr_count = (uint32_t *)calloc(IO_N, sizeof(uint32_t));
@@ -167,8 +170,15 @@ int main(int argc, char **argv)
     if (cy_init(&c) != 0)
         return 2;
     cy_load(&c, 0, img, (uint32_t)n);
-    c.pc = cy_read32(&c, 0) & CY_ADDR_MASK;
-    c.e[7] = 0x23FF00;
+    cy_flash_load_env(&c);
+    if (argc > 3 && strcmp(argv[3], "cyos") == 0) {
+        c.pc = cy_read32(&c, CY_RAM_BASE + 4) & CY_ADDR_MASK;
+        c.e[7] = 0x27FF00;
+        printf("starting at the CyOS entry 0x%06X\n", c.pc);
+    } else {
+        c.pc = cy_read32(&c, 0) & CY_ADDR_MASK;
+        c.e[7] = 0x23FF00;
+    }
 
     cy_run(&c, budget);
 

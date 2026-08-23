@@ -125,15 +125,26 @@ def body(i):
         count = (i.raw[1] >> 4) + 1
         reg = i.raw[3] & 7
         if i.raw[3] & 0x80:
-            first = reg
-            out = ["E[7] -= %d;" % (4 * count)]
-            out += ["MWL(E[7] + %d, E[%d]);" % (4 * k, first + k)
-                    for k in range(count)]
+            # STM is a run of pre-decrement pushes taking the *lowest*
+            # register first, so ERm ends up at the highest address of the
+            # block and ERm+n at the lowest.
+            #
+            # Neither of the two obvious layouts is right, and the difference
+            # is invisible in memory contents -- only the order and placement
+            # of the stores gives it away. A write-stream diff against MAME
+            # settled it: for `stm.l (er4-er5), @-sp` the hardware's first
+            # store is ER4 (0x00005D50) at 0xFFFAF0, then ER5 at 0xFFFAEC.
+            for k in range(count):
+                out.append("E[7] -= 4;")
+                out.append("MWL(E[7], E[%d]);" % (reg + k))
         else:
+            # LDM unwinds that: highest register first, from the lowest
+            # address. It names the last register, so the block is
+            # ERreg-count+1 .. ERreg.
             first = reg - count + 1
-            out = ["E[%d] = MRL(E[7] + %d);" % (first + k, 4 * k)
-                   for k in range(count)]
-            out.append("E[7] += %d;" % (4 * count))
+            for k in range(count - 1, -1, -1):
+                out.append("E[%d] = MRL(E[7]);" % (first + k))
+                out.append("E[7] += 4;")
         return out
 
     if base == "nop":

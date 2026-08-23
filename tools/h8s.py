@@ -264,6 +264,31 @@ def _mov_ea(d, a, op, size, off):
 
     if form == 0x0A:                                   # @aa
         hi = b1 >> 4
+        # 6A/6B with hi of 1 or 3 is not a MOV at all: it is a bit operation
+        # whose operand is an absolute address, with the actual op in a
+        # trailing word. 6A 1x is @aa:16 (6 bytes), 6A 3x is @aa:24 (8).
+        #
+        # Reading one of these as a 4-byte MOV desynchronises the stream, and
+        # the wreckage is not obviously wrong: `6A 38 00FF FF8C 7270`, which
+        # is `bclr #7, @0xFFFF8C`, came out as a 4-byte load followed by
+        # `mov.b #0x8C, r7l` -- a write into the low byte of the stack
+        # pointer. Two instructions later the rts returned through a corrupted
+        # stack to address zero.
+        if hi in (0x1, 0x3, 0x9, 0xB):
+            wide = hi in (0x3, 0xB)
+            need = 8 if wide else 6
+            if n < off + need:
+                return None
+            addr = (u24(d, a + off + 3) if wide else u16(d, a + off + 2))
+            if not wide and (addr & 0x8000):
+                addr |= 0xFF0000
+            bop = d[a + off + need - 2]
+            name = ("bset", "bnot", "bclr", "btst")[bop & 3]                 if 0x70 <= bop <= 0x73 else "bit-op"
+            bit = (d[a + off + need - 1] >> 4) & 7
+            return Insn(a, off + need, name,
+                        ("#%d" % bit, "@0x%06X" % (addr & 0xFFFFFF)),
+                        raw=d[a:a + off + need],
+                        sd=(("abs", "b", addr & 0xFFFFFF), I("b", bit)))
         wide = hi in (0x2, 0xA)
         store = hi in (0x8, 0xA)
         need = 6 if wide else 4

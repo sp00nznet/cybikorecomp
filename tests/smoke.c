@@ -43,7 +43,24 @@ int main(int argc, char **argv)
     c.e[7] = 0x23FF00;
     printf("image %s: %zu bytes, reset vector 0x%06X\n", argv[1], n, c.pc);
 
-    cy_run(&c, budget);
+    /* Optional periodic interrupt. The boot ROM's timeout loops wait on a
+     * counter that only an interrupt handler advances, so without one they
+     * wait forever -- correctly, since on real hardware a timer is ticking. */
+    int vec = (argc > 3) ? atoi(argv[3]) : 0;
+    uint64_t period = (argc > 4) ? strtoull(argv[4], NULL, 0) : 2000;
+    if (vec) {
+        while (c.cycles < budget && !c.trapped) {
+            cy_run(&c, c.cycles + period);
+            /* Only when the ROM has unmasked interrupts. It boots with
+             * `orc #0x80, ccr` and clears the I bit once its handler table is
+             * installed -- delivering before that vectors through an empty
+             * slot straight to address zero. */
+            if (!c.trapped && !c.iff)
+                cy_interrupt(&c, vec);
+        }
+    } else {
+        cy_run(&c, budget);
+    }
 
     printf("stopped after %llu steps at pc=0x%06X\n",
            (unsigned long long)c.cycles, c.pc);

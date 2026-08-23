@@ -440,7 +440,16 @@ def emit_chunk(k, ch, ops, where, w):
             continue
 
         if i.kind in (K_RET, K_RTE):
-            w("    c->pc = MRL(E[7]) & 0xFFFFFF; E[7] += 4;\n    return;\n")
+            if i.kind == K_RTE:
+                # The interrupt frame carries CCR in the top byte of the
+                # pushed longword. An RTE that restores only the PC leaves
+                # interrupts masked forever after the first one, so the
+                # second never arrives and every timeout hangs.
+                w("    t = MRL(E[7]); E[7] += 4;\n")
+                w("    CY_CCR_SET(c, t >> 24); c->pc = t & 0xFFFFFF;\n")
+                w("    return;\n")
+            else:
+                w("    c->pc = MRL(E[7]) & 0xFFFFFF; E[7] += 4;\n    return;\n")
             covered += 1
             continue
 

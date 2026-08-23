@@ -40,13 +40,10 @@ int cy_load(cy_t *c, uint32_t addr, const void *data, uint32_t len)
 
 uint8_t cy_read8(cy_t *c, uint32_t a)
 {
+    uint8_t v;
     a &= CY_ADDR_MASK;
-    if (a == CY_SSR2) {
-        /* Always ready to send, never anything received. Without this the
-         * boot ROM spins here forever -- it was 497,183 of the first 500,000
-         * memory reads. */
-        return CY_SSR_TDRE | CY_SSR_TEND;
-    }
+    if (cy_io_read(c, a, &v))
+        return v;
     return c->mem[a];
 }
 
@@ -68,8 +65,8 @@ uint32_t cy_read32(cy_t *c, uint32_t a)
 void cy_write8(cy_t *c, uint32_t a, uint8_t v)
 {
     a &= CY_ADDR_MASK;
-    if (a == CY_TDR2 && c->serial_len < sizeof(c->serial) - 1)
-        c->serial[c->serial_len++] = (char)v;
+    if (cy_io_write(c, a, v))
+        return;
     c->mem[a] = v;
 }
 

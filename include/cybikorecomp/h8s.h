@@ -84,6 +84,18 @@ void cy_write8(cy_t *c, uint32_t a, uint8_t v);
 void cy_write16(cy_t *c, uint32_t a, uint16_t v);
 void cy_write32(cy_t *c, uint32_t a, uint32_t v);
 
+/* Deliver an interrupt: push the return address with CCR packed into its top
+ * byte, mask further interrupts, and vector. This is what the boot ROM's
+ * timeout loops are waiting for -- they poll a tick counter that only an
+ * interrupt handler ever advances. */
+void cy_interrupt(cy_t *c, int vector);
+
+/* Peripheral behaviour, in src/io.c. Both return nonzero when they have
+ * handled the access; every provider of the accessors below must call them,
+ * or it is emulating a different machine from the one being measured. */
+int cy_io_read(cy_t *c, uint32_t a, uint8_t *out);
+int cy_io_write(cy_t *c, uint32_t a, uint8_t v);
+
 /* Generated. Runs from c->pc until a trap or `budget` cycles. */
 void cy_run(cy_t *c, uint64_t budget);
 

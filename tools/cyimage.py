@@ -6,7 +6,11 @@ Analysed apart, every one of those calls looks like a target outside the image;
 analysed together they are ordinary edges.
 
     0x000000-0x007FFF   cyrom112.bin, the H8S internal ROM
-    0x200000-0x23FFFF   cyram.bin, SRAM dumped out of MAME after boot
+    0x200000-0x27FFFF   cyram.bin, SRAM dumped out of MAME after boot
+
+The SRAM is 512K, not 256K. The boot ROM says so itself -- "Testing 512k
+of memory @200000" -- and a stack pointer at 0x27FF6C proves it uses the
+upper half.
 
 Everything between is unmapped and filled with 0xFF, which the analyzer treats
 as padding rather than code.
@@ -16,7 +20,7 @@ as padding rather than code.
 import sys
 
 ROM_BASE, ROM_SIZE = 0x000000, 0x008000
-RAM_BASE, RAM_SIZE = 0x200000, 0x040000
+RAM_BASE, RAM_SIZE = 0x200000, 0x080000
 IMAGE_SIZE = RAM_BASE + RAM_SIZE
 
 

@@ -92,3 +92,32 @@ executed rather than parsed.
 
 The dump also gives a way to attack the codec later on much better terms: a
 known plaintext, with its packed source in the flash to match it against.
+
+## Clear MAME's nvram before dumping
+
+MAME persists both the AT45DB flash *and* the whole 512K SRAM between runs, and
+restores them at startup. A dump is therefore not of a cold boot; it is of
+whatever previous runs left behind.
+
+This makes dumps silently unreproducible. The same command produced a RAM image
+with CyOS loaded -- 31% non-zero, code-likelihood 0.46 -- and later, with
+nothing about the invocation changed, one without it: 14.5% non-zero,
+code-likelihood 0.01, and an analysis that collapsed from 39,899 instructions
+to 6,417.
+
+```sh
+rm -rf nvram/cybikov1
+mame cybikov1 -video none -sound none -seconds_to_run 30 -nothrottle \
+     -autoboot_script tools/mame_dump.lua
+```
+
+The instinct on seeing the collapse was that the *cleared* state would be the
+empty one. It is the other way round: a cold boot loads CyOS properly, and the
+persisted image was a half-initialised state some earlier probe run had left.
+
+## The SRAM is 512K
+
+Not 256K, which is what the first version of every tool here assumed. The boot
+ROM says so itself -- `Testing 512k of memory @200000` -- and a stack pointer
+observed at 0x27FF6C settles it. Dumping and mapping only the lower half meant
+anything the machine put above 0x240000 was invisible.

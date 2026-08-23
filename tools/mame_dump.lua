@@ -14,7 +14,7 @@
 local OUT     = os.getenv("CYRAM_OUT") or "cyram.bin"
 local OUT_IO  = os.getenv("CYIO_OUT")  or "cyio.bin"
 local RAM_LO  = 0x200000
-local RAM_HI  = 0x23FFFF
+local RAM_HI  = 0x27FFFF   -- 512K: the ROM prints "Testing 512k of memory"
 -- On-chip RAM and the I/O block. The boot ROM keeps its API dispatch table
 -- here -- 43 of its indirect calls load a target from a fixed address in this
 -- range, so without it those calls cannot be resolved at all.

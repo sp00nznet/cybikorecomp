@@ -102,7 +102,7 @@ def prologue_seeds(d, base=0, lo=0, hi=None):
 # 0xFF fill cyimage.py pads with -- and 0xFF decodes as a perfectly valid
 # `mov.b #imm, r7l`, so a trace that wanders into padding never stops and
 # reports more "code" than the image contains. Ask before following.
-CYBIKO_REGIONS = ((0x000000, 0x008000), (0x200000, 0x240000))
+CYBIKO_REGIONS = ((0x000000, 0x008000), (0x200000, 0x280000))
 
 
 def in_region(a, regions):

@@ -24,7 +24,7 @@ import sys
 
 import analyze
 
-RAM_LO, RAM_HI = 0x200000, 0x240000
+RAM_LO, RAM_HI = 0x200000, 0x280000
 MIN_ENTRIES = 3
 
 # The boot ROM's interrupt handler table, in on-chip RAM. Eleven slots, each

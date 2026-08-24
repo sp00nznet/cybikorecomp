@@ -79,6 +79,18 @@ typedef struct cy {
     cy_lcd_t lcd;
 } cy_t;
 
+/* How fast this machine runs, and the only knob that says so.
+ *
+ * The 8-bit timer is clocked at phi/8192 and its counter is derived from the
+ * dispatch count rather than stepped, so this number is what ties guest time
+ * to ours: instructions per timer tick. The tick handler reloads TCNT0 with
+ * 0xF2 -- 14 counts -- and its callers treat that as 10 ms, which fixes the
+ * rest. Turn CY_TMR_DIV up to slow the guest's clock down. */
+#define CY_TMR_DIV      2600u
+#define CY_TICK_COUNTS  14u                        /* 0x100 - 0xF2 */
+#define CY_TICK_MS      10u
+#define CY_DISPATCH_HZ  ((CY_TMR_DIV * CY_TICK_COUNTS * 1000u) / CY_TICK_MS)
+
 void cy_io_reset(cy_t *c);
 void cy_irq_poll(cy_t *c);
 

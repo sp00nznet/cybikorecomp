@@ -37,8 +37,15 @@ the LCD. It is waiting on the keyboard now.
 | **C emitter** | ✅ 100.0% of traced instructions |
 | **Runtime** — CPU state, memory, flags, interrupts | ✅ |
 | **Peripherals** — flash, timers, LCD | ✅ see [docs/PERIPHERALS.md](docs/PERIPHERALS.md) |
+| **Frontends** — terminal, and an SDL window | ✅ |
 | **Peripherals** — keyboard, sound, radio | ⬜ not started |
 | **`0x02` compression** | 🔨 unidentified, and no longer blocking |
+
+![the Cybiko's panel in a window](docs/screenshot.png)
+
+The four bars are CyOS's own grey ramp — `FF AA 55 00` repeated, identical on
+all 100 rows — which is the last thing it draws before it starts waiting for a
+key. It is a real frame off a real controller model, not a test card.
 
 ```
 $ smoke cybiko.img 20000000 cyos
@@ -194,7 +201,8 @@ cybikorecomp/
 │   ├── mem.c            memory and condition codes
 │   ├── io.c             the peripherals, and interrupt delivery
 │   ├── flash.c          the AT45DB041 behind SCI1
-│   └── lcd.c            the HD66421
+│   ├── lcd.c            the HD66421
+│   └── sdl_main.c       the panel in a window
 └── docs/  CYOS.md  INDIRECT.md  FORMATS.md  PERIPHERALS.md
 ```
 
@@ -226,8 +234,22 @@ CYFLASH=flash_v1246.bin ./lcdprobe cybiko.img 20000000 cyos
 ```
 
 `smoke` prints what CyOS said on the debug serial and whether control ever
-left the image; `lcdprobe` prints the panel. When `smoke` reports an address
-it was refused, add it to the seeds file and emit again.
+left the image; `lcdprobe` prints the panel as characters. When `smoke`
+reports an address it was refused, add it to the seeds file and emit again.
+
+The window needs SDL2 and nothing else:
+
+```sh
+cc -std=c11 -O1 -Iinclude $(pkg-config --cflags sdl2) -c src/sdl_main.c
+cc cyos.o mem.o io.o flash.o lcd.o sdl_main.o $(pkg-config --libs sdl2) -o cybiko-sdl
+
+CYFLASH=flash_v1246.bin ./cybiko-sdl cybiko.img cyos
+CYFLASH=flash_v1246.bin SDL_VIDEODRIVER=dummy ./cybiko-sdl cybiko.img cyos --shot screen.bmp 6
+```
+
+`--shot` runs flat out to a mark and writes one frame, which is how the
+renderer gets checked without a display. There is no input yet — the keyboard
+is the next peripheral, and it is what CyOS is waiting on.
 
 ## Where the images come from
 

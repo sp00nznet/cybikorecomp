@@ -33,9 +33,10 @@
  * into timer ticks and is the one number here that is a guess. The timer is
  * configured for phi/8192, about 1.3 kHz at 11 MHz; 14 of those is the 10 ms
  * the tick handler's callers assume, so DIV is set to put 14 ticks in the
- * instructions this runs in 10 ms. Speed the machine up or down here.
+ * instructions this runs in 10 ms. Speed the machine up or down with
+ * CY_TMR_DIV in h8s.h, which the frontends read to pace themselves.
  */
-#define TMR_DIV 2600u          /* instructions per timer tick -- calibrate */
+#define TMR_DIV CY_TMR_DIV
 
 #define TCR0  0xFFFFB0u
 #define TCSR0 0xFFFFB2u

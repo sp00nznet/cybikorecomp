@@ -15,6 +15,7 @@
 
 #include <stdint.h>
 
+#include "cybikorecomp/keyboard.h"
 #include "cybikorecomp/lcd.h"
 
 /* Advanced mode: 24-bit addresses. 16 MB of flat memory is less than the
@@ -76,7 +77,8 @@ typedef struct cy {
     uint8_t  sci0[512];
     uint32_t sci0_len;
 
-    cy_lcd_t lcd;
+    cy_lcd_t  lcd;
+    cy_keys_t keys;
 } cy_t;
 
 /* How fast this machine runs, and the only knob that says so.

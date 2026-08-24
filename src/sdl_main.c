@@ -3,7 +3,8 @@
  *   cybiko-sdl <cybiko.img> [cyos]
  *   cybiko-sdl <cybiko.img> [cyos] --shot out.bmp [seconds]
  *
- * Escape or the close button quits. $CYFLASH names a flash image, without
+ * Shift+Escape or the close button quits; plain Escape is the Cybiko's own
+ * Esc key. $CYFLASH names a flash image, without
  * which CyOS stops at "Initializing flash device...".
  *
  * --shot runs without pacing and writes one frame to a BMP. It exists because
@@ -14,9 +15,9 @@
  * and cy_lcd_dot to read the panel, the same two things the terminal probe
  * uses -- the recompiled image has no idea it is being drawn.
  *
- * There is no input yet. The Cybiko's keyboard is the next unimplemented
- * peripheral and CyOS is currently waiting on it, so what the window shows is
- * whatever CyOS drew on its way there.
+ * Typing goes into the key matrix. Nothing reads that matrix yet -- the code
+ * that scans it is a module CyOS loads from flash at runtime and it is not in
+ * the recompiled image, so the panel will not answer. See docs/KEYBOARD.md.
  */
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -45,6 +46,39 @@
 #define SLICE   (CY_DISPATCH_HZ / FPS)     /* dispatches in one frame */
 
 static const SDL_Color SHELL = { 0x27, 0x2A, 0x2E, 0xFF };
+
+/* The keys with no ASCII of their own. Everything printable goes through
+ * cy_key_from_ascii, so this is only the ones a character cannot name. */
+static uint8_t key_of(SDL_Keycode k)
+{
+    switch (k) {
+    case SDLK_RETURN: case SDLK_KP_ENTER: return CY_KEY_ENTER;
+    case SDLK_BACKSPACE:                  return CY_KEY_BKSP;
+    case SDLK_TAB:                        return CY_KEY_TAB;
+    case SDLK_SPACE:                      return CY_KEY_SPACE;
+    case SDLK_ESCAPE:                     return CY_KEY_ESC;
+    case SDLK_DELETE:                     return CY_KEY_DEL;
+    case SDLK_INSERT:                     return CY_KEY_INS;
+    case SDLK_LEFT:                       return CY_KEY_LEFT;
+    case SDLK_RIGHT:                      return CY_KEY_RIGHT;
+    case SDLK_UP:                         return CY_KEY_UP;
+    case SDLK_DOWN:                       return CY_KEY_DOWN;
+    case SDLK_LSHIFT: case SDLK_RSHIFT:   return CY_KEY_SHIFT;
+    case SDLK_LALT:   case SDLK_RALT:     return CY_KEY_FN;
+    case SDLK_LCTRL:  case SDLK_RCTRL:    return CY_KEY_SELECT;
+    case SDLK_PAGEUP:                     return CY_KEY_HELP;
+    case SDLK_F1:                         return CY_KEY_F1;
+    case SDLK_F2:                         return CY_KEY_F2;
+    case SDLK_F3:                         return CY_KEY_F3;
+    case SDLK_F4:                         return CY_KEY_F4;
+    case SDLK_F5:                         return CY_KEY_F5;
+    case SDLK_F6:                         return CY_KEY_F6;
+    case SDLK_F7:                         return CY_KEY_F7;
+    default:
+        /* SDL keycodes for printable keys are their unshifted ASCII. */
+        return (k > 0 && k < 128) ? cy_key_from_ascii((int)k) : 0xFF;
+    }
+}
 
 /* Four grey levels, darkest first. Level 3 is what the panel is cleared to,
  * so it is the colour of an idle STN panel and everything else is a step
@@ -149,10 +183,19 @@ int main(int argc, char **argv)
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT
-                || (e.type == SDL_KEYDOWN
-                    && e.key.keysym.sym == SDLK_ESCAPE))
+            if (e.type == SDL_QUIT) {
                 running = 0;
+            } else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
+                /* Escape is the Cybiko's Esc key; quit on the window close
+                 * button, or on a key Escape cannot be confused with. */
+                if (e.type == SDL_KEYDOWN
+                    && e.key.keysym.sym == SDLK_ESCAPE
+                    && (e.key.keysym.mod & KMOD_SHIFT))
+                    running = 0;
+                uint8_t k = key_of(e.key.keysym.sym);
+                if (k != 0xFF)
+                    cy_key(&c->keys, k, e.type == SDL_KEYDOWN);
+            }
         }
 
         if (!c->trapped)

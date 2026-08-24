@@ -38,7 +38,8 @@ the LCD. It is waiting on the keyboard now.
 | **Runtime** — CPU state, memory, flags, interrupts | ✅ |
 | **Peripherals** — flash, timers, LCD | ✅ see [docs/PERIPHERALS.md](docs/PERIPHERALS.md) |
 | **Frontends** — terminal, and an SDL window | ✅ |
-| **Peripherals** — keyboard, sound, radio | ⬜ not started |
+| **Keyboard** — the 9x8 matrix, and typing into it | 🔨 nothing scans it, see [docs/KEYBOARD.md](docs/KEYBOARD.md) |
+| **Peripherals** — sound, radio | ⬜ not started |
 | **`0x02` compression** | 🔨 unidentified, and no longer blocking |
 
 ![the Cybiko's panel in a window](docs/screenshot.png)
@@ -190,20 +191,24 @@ cybikorecomp/
 │   ├── emit.py          traced image → C
 │   ├── cyapp.py         the .app container: parse, list, extract
 │   ├── mame_dump.lua    dump CyOS out of a running MAME
+│   ├── mame_lcd.lua     reconstruct a real Cybiko's panel, to compare against
+│   ├── mame_iomap.lua   what a real Cybiko touches outside ROM and SRAM
 │   └── mame_probe.lua   hunt a routine by how it writes memory
 ├── tests/
 │   ├── test_decode.py   encoding checks, plus whole-ROM and whole-library ones
 │   ├── smoke.c          does the recompiled image execute?
 │   ├── ioprobe.c        which I/O registers does it actually touch?
-│   └── lcdprobe.c       print the panel as characters
+│   ├── lcdprobe.c       print the panel as characters
+│   └── keyprobe.c       the key matrix holds what it is told
 ├── include/cybikorecomp/  h8s.h  lcd.h
 ├── src/
 │   ├── mem.c            memory and condition codes
 │   ├── io.c             the peripherals, and interrupt delivery
 │   ├── flash.c          the AT45DB041 behind SCI1
 │   ├── lcd.c            the HD66421
+│   ├── keyboard.c       the 9x8 key matrix
 │   └── sdl_main.c       the panel in a window
-└── docs/  CYOS.md  INDIRECT.md  FORMATS.md  PERIPHERALS.md
+└── docs/  CYOS.md  INDIRECT.md  FORMATS.md  PERIPHERALS.md  KEYBOARD.md
 ```
 
 ## Usage
@@ -248,8 +253,12 @@ CYFLASH=flash_v1246.bin SDL_VIDEODRIVER=dummy ./cybiko-sdl cybiko.img cyos --sho
 ```
 
 `--shot` runs flat out to a mark and writes one frame, which is how the
-renderer gets checked without a display. There is no input yet — the keyboard
-is the next peripheral, and it is what CyOS is waiting on.
+renderer gets checked without a display.
+
+Typing goes into the key matrix, and stops there. Nothing scans it: the code
+that does is `keybd.app`, a module CyOS loads from flash at runtime, and it is
+not in the RAM snapshot this recompiles. [docs/KEYBOARD.md](docs/KEYBOARD.md)
+has the matrix, and what it would take to close the last link.
 
 ## Where the images come from
 

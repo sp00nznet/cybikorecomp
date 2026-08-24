@@ -163,7 +163,23 @@ def _decode_01(d, a, n):
                  r32(b3 & 7) if wide else r16(b3 & 0xF))
         return Insn(a, 4, m, names, raw=d[a:a + 4], sd=(dst, src))
     if b1 == 0xF0 and n >= 4:
-        # TAS @ERd: flag the byte, then set its top bit.
+        # The 32-bit logic ops: `01 F0 6x sd` is the 16-bit opcode 0x64-0x66
+        # widened to longword, with the source in the high nibble.
+        #
+        # This is not TAS, which is what it was read as for a long time --
+        # TAS is `01 E0 7B 0r 0C`. The two look alike and one of them is in
+        # the boot ROM's LZSS decompressor at 0x00394A, where reading
+        # `or.l er2, er0` as "flag a byte and set its top bit" corrupted a
+        # handful of bytes in every decompressed page.
+        b2, b3 = d[a + 2], d[a + 3]
+        if b2 in (0x64, 0x65, 0x66) and not (b3 & 0x88):
+            m = {0x64: "or", 0x65: "xor", 0x66: "and"}[b2]
+            src, dst = (b3 >> 4) & 7, b3 & 7
+            return Insn(a, 4, m + ".l", (r32(src), r32(dst)), raw=d[a:a + 4],
+                        sd=(R("l", dst), R("l", src)))
+    if b1 == 0xE0 and n >= 4 and d[a + 2] == 0x7B and (d[a + 3] & 0x0F) == 0x0C:
+        # TAS @ERd: flag the byte, then set its top bit. Nothing in this image
+        # uses it -- every "TAS" here turned out to be a 32-bit logic op.
         return Insn(a, 4, "tas", ("@%s" % r32((d[a + 3] >> 4) & 7),),
                     raw=d[a:a + 4],
                     sd=(("ind", "b", (d[a + 3] >> 4) & 7), None))

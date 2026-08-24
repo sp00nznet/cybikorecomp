@@ -165,8 +165,10 @@ int cy_io_write(cy_t *c, uint32_t a, uint8_t v)
         return 0;
 
     case CY_SPI_CS:
-        /* Deasserting chip select ends whatever command was in progress. */
-        if (!(v & CY_SPI_CS_BIT))
+        /* Chip select is active *low*: the boot ROM clears bit 4 with
+         * `and.b #0xEF` before a command and sets it again with
+         * `or.b #0x10` afterwards, so a one here is the end of a command. */
+        if (v & CY_SPI_CS_BIT)
             cy_flash_deselect(c);
         return 0;
 

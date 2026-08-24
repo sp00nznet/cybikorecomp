@@ -27,12 +27,22 @@
  * in whether it will run at the higher clock rate. */
 #define CMD_READ_CONT_LOW   0x52u   /* continuous array read, legacy */
 #define CMD_READ_CONT       0x68u
-#define CMD_READ_PAGE_LOW   0xD2u   /* main memory page read */
-#define CMD_READ_PAGE       0x57u
+#define CMD_READ_PAGE       0xD2u   /* main memory page read */
+
+/* Status has two opcodes and the boot ROM uses the older one. Reading 0x57
+ * as a page read instead cost a boot: the ROM took the 0xFF that a
+ * half-parsed command returns, pulled bits 5-3 out of it, and announced
+ * "Detected flash device model 7 [-5 blocks of 0 bytes]" -- a model number
+ * off the end of its own table. */
+#define CMD_STATUS_LOW      0x57u
 #define CMD_STATUS          0xD7u
 
-/* Status: bit 7 set means "not busy", bits 5-2 are the density code. 0b1100
- * is the AT45DB041. Nothing here is ever busy, so bit 7 stays set. */
+/* Status: bit 7 set means "not busy", bits 5-2 are the density code, 0111 for
+ * the AT45DB041. Nothing here is ever busy, so bit 7 stays set.
+ *
+ * The boot ROM takes bits 5-3 rather than 5-2 -- `shlr.w #2` then `shlr.w`
+ * then `and #7` at 0x002E28 -- so what it reads out of 0x9C is 3, and 3 is
+ * the entry in its table that says 2048 pages. */
 #define STATUS_READY  0x9Cu
 
 int cy_flash_load(cy_t *c, const void *data, uint32_t len)
@@ -56,6 +66,18 @@ void cy_flash_deselect(cy_t *c)
     c->spi_argn = 0;
 }
 
+/* $CYFLASHLOG traces the command stream. What the chip is asked for is the
+ * only way to tell a command that is unimplemented from one that is
+ * implemented wrongly, and the two look identical from the guest. */
+static void trace(const char *what, uint8_t v, uint32_t addr)
+{
+    static int on = -1;
+    if (on < 0)
+        on = getenv("CYFLASHLOG") != NULL;
+    if (on)
+        fprintf(stderr, "[flash] %-6s %02X  @%06X\n", what, v, addr);
+}
+
 uint8_t cy_flash_xfer(cy_t *c, uint8_t out)
 {
     if (!c->flash)
@@ -65,7 +87,8 @@ uint8_t cy_flash_xfer(cy_t *c, uint8_t out)
     case 0:                                   /* expecting a command */
         c->spi_cmd = out;
         c->spi_argn = 0;
-        c->spi_state = (out == CMD_STATUS) ? 2 : 1;
+        c->spi_state = (out == CMD_STATUS || out == CMD_STATUS_LOW) ? 2 : 1;
+        trace("cmd", out, 0);
         return 0xFF;
 
     case 1:                                   /* collecting address bytes */
@@ -84,11 +107,13 @@ uint8_t cy_flash_xfer(cy_t *c, uint8_t out)
                 off = PAGE_BYTES - 1;
             c->spi_addr = page * PAGE_BYTES + off;
         }
-        /* Both read commands need don't-care bytes before data starts: four
-         * for the fast forms, one for the legacy ones. */
-        c->spi_dummy = (c->spi_cmd == CMD_READ_CONT
-                        || c->spi_cmd == CMD_READ_PAGE) ? 4 : 1;
+        /* Four don't-care bytes before the data starts, on every read form.
+         * The boot ROM makes this unusually easy to confirm: it builds the
+         * command and address as one 32-bit word at 0x002BB6, sends those
+         * four bytes, then sends the same four again as the don't-cares. */
+        c->spi_dummy = 4;
         c->spi_state = 3;
+        trace("addr", c->spi_cmd, c->spi_addr);
         return 0xFF;
 
     case 2:                                   /* status register */

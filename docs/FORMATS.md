@@ -140,12 +140,26 @@ That is a table-driven CRC-32 feeding a page-program command. Useful to have
 identified — it is how the boot ROM writes flash — but the unpacker is
 elsewhere.
 
-Two ways left, in order of expected cost:
+### Found: it is LZSS, at `0x0038B2`
 
-1. **Watch it happen.** MAME emulates the Cybiko (`cybikov1`) and its debugger
-   can break on flash reads and trace. The routine that consumes a packed
-   stream will announce itself. This is cheap and does not depend on resolving
-   any indirect call.
-2. **Resolve more of the boot ROM.** 65% of it is unreached behind 47
-   `jsr @ERn`. The unpacker is plausibly in there, and this work is needed
-   anyway.
+The first of the two remaining options was "watch it happen", and that is what
+did it — though not under MAME. Once the recompiled boot ROM had a working
+flash to read, it loaded CyOS and narrated the whole thing:
+
+```
+Got header: magic 1C0FFAB (valid) LZSS compressed image
+boot header size 12
+Compressed size 72510 decompressed size 128260
+decompressing...
+```
+
+The decompressor is `0x0038B2`-`0x003996`, and the search above had it
+surrounded without ever landing on it: it is not shift-heavy, because the
+match copy is a plain byte loop at `0x00396E` and the flag bits come out
+through the 32-bit logic ops the decoder was misreading as `TAS`. Fixing that
+one instruction is what made the decompression correct — see
+[LOADER.md](LOADER.md).
+
+So `0x02` inside a `.app` is LZSS, with a reference implementation in the boot
+ROM and a running one to check any port of it against. `main.e` extraction is
+no longer blocked on identifying a codec, only on writing it.

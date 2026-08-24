@@ -2,7 +2,7 @@
 
 **A static-recompilation toolkit for the Cybiko — a 2000 handheld with a Hitachi H8S, a keyboard, and a 900 MHz radio in it.**
 
-The Cybiko Classic runs a **Hitachi H8S/2246** at 11 MHz in advanced mode:
+The Cybiko Classic runs a **Hitachi H8S/2241** at 11 MHz in advanced mode:
 32-bit registers, 24-bit addresses, big-endian, variable-length instructions.
 Around it sit 512 KB of flash holding **CyOS**, a 32 KB internal boot ROM, a
 QWERTY keyboard, and a 900 MHz packet radio that let a room full of them form
@@ -23,9 +23,11 @@ first job is measuring it honestly rather than assuming.
 
 ## Status
 
-**CyOS boots.** It initialises its dispatcher, name list, flash and memory
-manager, reads its own filesystem over SPI, runs on a 10 ms tick and draws to
-the LCD. It is waiting on the keyboard now.
+**The machine boots itself.** The recompiled boot ROM reads the flash, finds
+CyOS, decompresses it and starts it — and the image it produces is
+byte-for-byte the one MAME produces. CyOS then initialises its dispatcher,
+name list, flash and memory manager, runs on a 10 ms tick and draws to the
+LCD. See [docs/LOADER.md](docs/LOADER.md).
 
 | Stage | State |
 |---|---|
@@ -37,10 +39,11 @@ the LCD. It is waiting on the keyboard now.
 | **C emitter** | ✅ 100.0% of traced instructions |
 | **Runtime** — CPU state, memory, flags, interrupts | ✅ |
 | **Peripherals** — flash, timers, LCD | ✅ see [docs/PERIPHERALS.md](docs/PERIPHERALS.md) |
+| **Boot loader** — flash → LZSS → CyOS running | ✅ byte-identical to MAME's image |
 | **Frontends** — terminal, and an SDL window | ✅ |
 | **Keyboard** — the 9x8 matrix, and typing into it | 🔨 nothing scans it, see [docs/KEYBOARD.md](docs/KEYBOARD.md) |
 | **Peripherals** — sound, radio | ⬜ not started |
-| **`0x02` compression** | 🔨 unidentified, and no longer blocking |
+| **`0x02` compression** | 🔨 **LZSS** — the boot ROM says so, and implements it |
 
 ![the Cybiko's panel in a window](docs/screenshot.png)
 
@@ -49,16 +52,19 @@ all 100 rows — which is the last thing it draws before it starts waiting for a
 key. It is a real frame off a real controller model, not a test card.
 
 ```
-$ smoke cybiko.img 20000000 cyos
-CyOS header ok, entry 0x21965C
-serial output (110 bytes):
----
+$ CYFLASH=flash_v1246.bin loader boot.img cyram.bin
+Detected flash device model 3 [1019 blocks of 254 bytes]
+OS loaded
+Got header: magic 1C0FFAB (valid) LZSS compressed image
+Compressed size 72510 decompressed size 128260
+decompressing...
+Got header: magic 1234ABCD (valid) plain image
+Starting...
+
 Initializing dispatcher...
 Initializing names list...
 Initializing flash device...
 Initializing memmgr...
----
-ok: ran the whole budget inside the image
 ```
 
 ```
@@ -199,7 +205,8 @@ cybikorecomp/
 │   ├── smoke.c          does the recompiled image execute?
 │   ├── ioprobe.c        which I/O registers does it actually touch?
 │   ├── lcdprobe.c       print the panel as characters
-│   └── keyprobe.c       the key matrix holds what it is told
+│   ├── keyprobe.c       the key matrix holds what it is told
+│   └── loader.c         let the ROM load CyOS, and keep what it loaded
 ├── include/cybikorecomp/  h8s.h  lcd.h
 ├── src/
 │   ├── mem.c            memory and condition codes
@@ -208,7 +215,8 @@ cybikorecomp/
 │   ├── lcd.c            the HD66421
 │   ├── keyboard.c       the 9x8 key matrix
 │   └── sdl_main.c       the panel in a window
-└── docs/  CYOS.md  INDIRECT.md  FORMATS.md  PERIPHERALS.md  KEYBOARD.md
+└── docs/  CYOS.md  INDIRECT.md  FORMATS.md  PERIPHERALS.md
+          KEYBOARD.md  LOADER.md
 ```
 
 ## Usage
@@ -236,6 +244,15 @@ cc cyos.o mem.o io.o flash.o lcd.o lcdprobe.o -o lcdprobe
 
 CYFLASH=flash_v1246.bin ./smoke    cybiko.img 20000000 cyos
 CYFLASH=flash_v1246.bin ./lcdprobe cybiko.img 20000000 cyos
+```
+
+Or let the machine boot itself, which needs no dump at all beyond the ROM:
+
+```sh
+python tools/cyimage.py cyrom112.bin /dev/zero -o boot.img   # empty RAM half
+cc -std=c11 -O1 -Iinclude -c tests/loader.c
+cc cyos.o mem.o io.o flash.o lcd.o keyboard.o loader.o -o loader
+CYFLASH=flash_v1246.bin ./loader boot.img cyram.bin
 ```
 
 `smoke` prints what CyOS said on the debug serial and whether control ever
